@@ -64,6 +64,7 @@ struct cscreen {
 	uint8_t *shm;
 	size_t shmsize;
 	struct bm view;		/* the shared buffer as a bitmap */
+	struct cwin *root;	/* events and menus of the screen's own pixels */
 };
 
 struct client {
@@ -164,7 +165,9 @@ static void send_event(struct cwin *cw, uint32_t class, uint16_t code, unsigned 
 	gettimeofday(&tv, NULL);
 	e.class = class;
 	e.code = code;
-	e.qualifier = (uint16_t)ieq(qual);
+	/* Intuition's qualifiers carry the mouse buttons too (moves while
+	   drawing are told from moves by them) */
+	e.qualifier = (uint16_t)(ieq(qual) | screens_buttons());
 	e.mousex = (int16_t)x;
 	e.mousey = (int16_t)y;
 	e.seconds = (uint32_t)tv.tv_sec;
@@ -467,7 +470,8 @@ static void set_menus(struct cwin *cw, const struct wbp_menuitem *in, int n)
 	cw->strip.arg = cw;
 	cw->strip.pick = cw_menupick;
 	cw->strip.state = NULL;
-	cw->w->menus = &cw->strip;
+	if (cw->w)
+		cw->w->menus = &cw->strip;
 }
 
 /* --- requests --- */
@@ -605,6 +609,36 @@ static void cs_bar_depth(struct screen *s)
 	screens_to_back(s);
 }
 
+static void root_button(struct screen *s, int x, int y, int button, int down, unsigned int qual)
+{
+	static const uint16_t codes[4][2] = {
+		{ 0, 0 }, { SELECTUP, SELECTDOWN }, { MENUUP, MENUDOWN }, { MIDDLEUP, MIDDLEDOWN },
+	};
+	struct cscreen *cs = s->owner;
+
+	if (button >= 1 && button <= 3)
+		send_event(cs->root, IDCMP_MOUSEBUTTONS, codes[button][down ? 1 : 0], qual, x, y, 0);
+}
+
+static void root_motion(struct screen *s, int x, int y)
+{
+	struct cscreen *cs = s->owner;
+
+	send_event(cs->root, IDCMP_MOUSEMOVE, 0, 0, x, y, 0);
+}
+
+static void root_key(struct screen *s, const struct keyev *k)
+{
+	struct cscreen *cs = s->owner;
+	int raw = amiga_rawkey(k->code);
+
+	if (raw != 0xff)
+		send_event(cs->root, IDCMP_RAWKEY, (uint16_t)(raw | (k->down ? 0 : IECODE_UP_PREFIX)),
+			   k->qual | (k->down == 2 ? IEQUALIFIER_REPEAT : 0), s->mx, s->my, k->code);
+	if (k->down && k->ch)
+		send_event(cs->root, IDCMP_VANILLAKEY, (uint16_t)k->ch, k->qual, s->mx, s->my, k->code);
+}
+
 static void do_open_screen(struct client *c, const struct wbp_hdr *h, const struct wbp_newscreen *n)
 {
 	struct cscreen *cs;
@@ -657,6 +691,15 @@ static void do_open_screen(struct client *c, const struct wbp_hdr *h, const stru
 	cs->s.bar_depth = cs_bar_depth;
 	cs->s.showtitle = (n->flags & WBP_SF_SHOWTITLE) != 0;
 	cs->s.flush_now = S->flush_now;
+	cs->s.root_button = root_button;
+	cs->s.root_motion = root_motion;
+	cs->s.root_key = root_key;
+	cs->root = calloc(1, sizeof(*cs->root));
+	cs->root->c = c;
+	cs->root->id = WBP_SCREEN_EVENT | cs->id;
+	cs->root->scr = &cs->s;
+	cs->root->memfd = -1;
+	cs->root->idcmp = 0xffffffff;
 	cs->s.mx = w / 2;
 	cs->s.my = ht / 2;
 	cs->s.fx = (float)cs->s.mx;
@@ -708,6 +751,9 @@ static void destroy_screen(struct cscreen *cs)
 			break;
 		}
 	screens_remove(&cs->s);
+	cs->s.menus = NULL;
+	free_menus(cs->root);
+	free(cs->root);
 	while (cs->s.top)
 		win_close(&cs->s, cs->s.top);
 	bm_free(&cs->s.root);
@@ -882,7 +928,7 @@ static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h
 
 static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 {
-	int screen_msg = h->type >= WBP_OPEN_SCREEN && h->type <= WBP_SCREEN_TITLE;
+	int screen_msg = h->type >= WBP_OPEN_SCREEN && h->type <= WBP_SCREEN_FLAGS;
 	struct cwin *cw = h->win && !screen_msg ? find_win(c, h->win) : NULL;
 	struct cscreen *cs = h->win && screen_msg ? find_screen(c, h->win) : NULL;
 
@@ -916,6 +962,21 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 	case WBP_SCREEN_TO_BACK:
 		if (cs)
 			screens_to_back(&cs->s);
+		break;
+	case WBP_SCREEN_MENUS:
+		if (cs) {
+			set_menus(cs->root, (const struct wbp_menuitem *)p,
+				  (int)(h->len / sizeof(struct wbp_menuitem)));
+			cs->s.menus = cs->root->menus ? &cs->root->strip : NULL;
+		}
+		break;
+	case WBP_SCREEN_FLAGS:
+		if (cs && h->len >= 4) {
+			uint32_t fl;
+
+			memcpy(&fl, p, 4);
+			cs->s.root_rmbtrap = (fl & WBP_SCF_RMBTRAP) != 0;
+		}
 		break;
 	case WBP_SCREEN_TITLE:
 		if (cs && h->len >= 4) {

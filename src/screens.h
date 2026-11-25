@@ -19,6 +19,8 @@ struct screen *screens_wb(void);
 void screens_palette(struct screen *s);
 /* a new screen of w x h scaled sx, sy on this display: its view */
 void screens_fit(struct screen *s);
+/* the mouse buttons held, as IEQUALIFIER_LEFTBUTTON/RBUTTON/MIDBUTTON */
+unsigned int screens_buttons(void);
 /* the standard pointer (busy: the stopwatch) on s */
 void screens_std_pointer(struct screen *s, int busy);
 

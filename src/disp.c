@@ -49,6 +49,17 @@ int disp_open(struct disp *d, const char *which, const char *mode, const char *s
 
 void disp_palette(struct disp *d, const uint8_t pal[256][3])
 {
+	int i, best = 0, bl = 1 << 30;
+
+	for (i = 0; i < 256; i++) {
+		int l = pal[i][0] * 3 + pal[i][1] * 6 + pal[i][2];
+		if (l < bl)
+			bl = l, best = i;
+	}
+	if (best != d->border_pen) {
+		d->border_pen = best;
+		d->view.gen++;          /* the border again */
+	}
 	if (d->ops->palette)
 		d->ops->palette(d, pal);
 }
@@ -152,11 +163,13 @@ int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char 
 		uint8_t row[3 * 2048];
 
 		for (x = 0; x < W && x < 2048; x++) {
-			int sx, sy, pen = 0;
+			int sx, sy;
 
+			/* outside the screen: black */
 			if (disp_view_map(d, x, y, &sx, &sy))
-				pen = src->px[(size_t)sy * src->stride + sx];
-			memcpy(row + 3 * x, pal[pen], 3);
+				memcpy(row + 3 * x, pal[src->px[(size_t)sy * src->stride + sx]], 3);
+			else
+				memset(row + 3 * x, 0, 3);
 		}
 		fwrite(row, 3, (size_t)x, f);
 	}

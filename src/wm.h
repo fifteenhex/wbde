@@ -164,6 +164,16 @@ struct screen {
 	int showtitle;			/* the bar in front of backdrop windows */
 	int id;				/* a client screen's */
 	void *owner;
+	/*
+	 * The screen's own pixels can take input, as an Intuition backdrop
+	 * window that is the screen bitmap does: buttons, moves and keys
+	 * where there is no window (or none is active).  NULL: ignored.
+	 */
+	void (*root_button)(struct screen *s, int x, int y, int button, int down,
+			    unsigned int qual);
+	void (*root_motion)(struct screen *s, int x, int y);
+	void (*root_key)(struct screen *s, const struct keyev *k);
+	int root_rmbtrap;		/* the right button is the root's, not menus */
 };
 
 void screen_init(struct screen *s, struct bm *fb, int depth, struct font *font);

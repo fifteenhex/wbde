@@ -94,9 +94,12 @@ static void soft_touch(struct disp *d, const struct rect *r)
 	struct smol2d_rect sr;
 
 	if (v->gen != p->gen) {
-		/* a new view: the border is the screen's colour 0 */
+		/* a new view: the border is black, the darkest pen there is (the
+		   CRTC's palette is the screen's) */
+		int dark = d->border_pen;
+
 		for (Y = 0; Y < p->phys.h; Y++)
-			memset(p->phys.px + (size_t)Y * p->phys.stride, 0, (size_t)p->phys.w);
+			memset(p->phys.px + (size_t)Y * p->phys.stride, dark, (size_t)p->phys.w);
 		p->gen = v->gen;
 		sr.x = 0;
 		sr.y = 0;

@@ -92,7 +92,7 @@ struct gpriv {
 	int overflow;
 	int lw, lh;			/* the logical screen */
 	int mw, mh;			/* the display */
-	sgpu_tex pen0;			/* 1x1, pen 0: the border round a smaller screen */
+	sgpu_tex pen0;			/* 1x1 XRGB black: the border round a smaller screen */
 	unsigned int viewgen;		/* the view the border was drawn for */
 	int clear;			/* draw the border this flush */
 	int full;			/* WBDE_GPU_FULL: redraw everything every flush */
@@ -440,7 +440,7 @@ static void border(struct gpriv *p, const struct disp_view *v)
 	float w = p->mw / v->sx, h = p->mh / v->sy;
 	int i;
 
-	batch_begin(p, PROG_PAL, &p->pen0, &p->pal, -1);
+	batch_begin(p, PROG_BLIT, &p->pen0, NULL, -1);
 	for (i = 0; i < 6 && p->nverts + 6 <= MAXQUADS * 6; i++) {
 		sgpu_vertex_2d *q = &p->verts[p->nverts++];
 
@@ -632,7 +632,7 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 	for (y = 0; y < H; y++)
 		for (x = 0; x < W; x++) {
 			int sx, sy, in = disp_view_map(d, x, y, &sx, &sy);
-			uint32_t want = p->colours[in ? ref->px[(size_t)sy * ref->stride + sx] : 0];
+			uint32_t want = in ? p->colours[ref->px[(size_t)sy * ref->stride + sx]] : 0;
 			uint32_t got = img[(size_t)y * W + x] & 0xffffff;
 
 			if (in && in_ext(s, sx, sy))
@@ -880,10 +880,10 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	sgpu_tex_filter(&p->pal, false, true);
 	sgpu_tex_filter(&p->xpal, false, true);
 	{
-		uint8_t zero = 0;
+		uint32_t black = 0;
 
-		sgpu_tex_create(&p->s, &p->pen0, 1, 1, SGPU_TEX_R8);
-		sgpu_tex_write_rect(&p->s, &p->pen0, 0, 0, 1, 1, &zero, 1);
+		sgpu_tex_create(&p->s, &p->pen0, 1, 1, SGPU_TEX_XRGB8);
+		sgpu_tex_write(&p->s, &p->pen0, &black, sizeof(black));
 		sgpu_tex_filter(&p->pen0, false, true);
 	}
 	p->clear = 1;

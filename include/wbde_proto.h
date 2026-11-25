@@ -45,6 +45,8 @@ enum wbp_type {
 	WBP_SCREEN_TO_FRONT,
 	WBP_SCREEN_TO_BACK,
 	WBP_SCREEN_TITLE,	/* int32_t showtitle (-1: unchanged), then the title */
+	WBP_SCREEN_MENUS,	/* wbp_menuitem[]: the menus of the screen's own pixels */
+	WBP_SCREEN_FLAGS,	/* uint32_t WBP_SCF_* */
 
 	/* server to client */
 	WBP_SCREEN = 64,	/* wbp_screen */
@@ -156,6 +158,17 @@ struct wbp_pointer {
 	int16_t hx, hy;			/* the hot spot, in the image */
 	uint16_t width, height;		/* then width * height pens */
 };
+
+/*
+ * The screen's own pixels as a window: events where there is no window
+ * (or none is active) come as WBP_EVENT with `win` = WBP_SCREEN_EVENT |
+ * the screen id, in screen coordinates; WBP_SCREEN_MENUS are the menus the
+ * right button shows there; WBP_SCF_RMBTRAP gives the right button to the
+ * screen instead.  What an Intuition backdrop window that draws into the
+ * screen's bitmap needs.
+ */
+#define WBP_SCREEN_EVENT	0x80000000
+#define WBP_SCF_RMBTRAP		0x0001
 
 struct wbp_palette {
 	uint16_t first, count;		/* then count * 3 bytes, r g b */

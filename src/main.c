@@ -303,9 +303,19 @@ static void pointer_to(int x, int y)
 	pointer_moved(s, now_ms());
 }
 
+static unsigned int buttons;	/* IEQUALIFIER_LEFTBUTTON etc. held now */
+
+unsigned int screens_buttons(void)
+{
+	return buttons;
+}
+
 static void cb_button(void *arg, int button, int down)
 {
 	struct screen *s = front;
+	unsigned int bit = button == 1 ? 0x4000 : button == 2 ? 0x2000 : 0x1000;
+
+	buttons = down ? buttons | bit : buttons & ~bit;
 	uint64_t now = now_ms();
 
 	W.now = now;
@@ -313,7 +323,7 @@ static void cb_button(void *arg, int button, int down)
 		if (down && !menu_is_open() && !wm_busy(s)) {
 			struct win *w = win_at(s, s->mx, s->my);
 
-			if (w && (w->flags & WF_RMBTRAP)) {
+			if ((w && (w->flags & WF_RMBTRAP)) || (!w && s->root_rmbtrap)) {
 				wm_button(s, button, down, input_qual(), now);
 				return;
 			}

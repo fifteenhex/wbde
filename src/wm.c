@@ -26,7 +26,7 @@ enum {
 	G_VCONT, G_UP, G_DOWN, G_HCONT, G_LEFT, G_RIGHT, G_CONTENT,
 };
 
-enum { M_NONE, M_GADGET, M_DRAG, M_SIZE, M_VKNOB, M_HKNOB, M_CONTENT, M_BARDEPTH };
+enum { M_NONE, M_GADGET, M_DRAG, M_SIZE, M_VKNOB, M_HKNOB, M_CONTENT, M_BARDEPTH, M_ROOT };
 
 #define CLOSE_W	19
 #define DEPTH_W	23
@@ -795,6 +795,9 @@ void screen_place_bar(struct screen *s)
 		return;
 	unlink_win(s, b);
 	link_above(s, b, s->showtitle ? highest_backdrop(s) : NULL);
+	/* without SA_ShowTitle the bar is behind the screen's backdrop, which
+	   may be the screen's own pixels: then it does not show at all */
+	b->dead = !s->showtitle && s->root_button;
 	damage_win(s, b);
 }
 
@@ -1089,10 +1092,16 @@ void wm_motion(struct screen *s, int x, int y, uint64_t now)
 		if (w->ops && w->ops->motion)
 			w->ops->motion(w, x - w->r.x - w->bl, y - w->r.y - w->bt);
 		break;
+	case M_ROOT:
+		if (s->root_motion)
+			s->root_motion(s, x, y);
+		break;
 	default:
 		w = s->active;
 		if (w && w->wants_motion && w->ops && w->ops->motion)
 			w->ops->motion(w, x - w->r.x - w->bl, y - w->r.y - w->bt);
+		else if (!w && s->root_motion)
+			s->root_motion(s, x, y);
 		break;
 	}
 }
@@ -1102,13 +1111,21 @@ static void button_down(struct screen *s, int button, unsigned int qual, uint64_
 	struct win *w = win_at(s, s->mx, s->my);
 	int x, y, g;
 
+
 	if (!w) {
 		struct rect gd = rect_make(s->w - DEPTH_W, 0, DEPTH_W, s->barh - 1);
 
-		if (button == 1 && rect_contains(&gd, s->mx, s->my)) {
+		if (button == 1 && !s->barwin && rect_contains(&gd, s->mx, s->my)) {
 			s->mode = M_BARDEPTH;
 			s->bar_depth_pressed = 1;
 			screen_draw_bar(s);
+		} else if (s->root_button) {
+			/* the screen's own pixels: they become "active" */
+			if (button == 1) {
+				win_activate(s, NULL);
+				s->mode = M_ROOT;
+			}
+			s->root_button(s, s->mx, s->my, button, 1, qual);
 		}
 		return;
 	}
@@ -1181,11 +1198,17 @@ static void button_up(struct screen *s, int button, unsigned int qual)
 		if (w && w->ops && w->ops->button)
 			w->ops->button(w, s->mx - w->r.x - w->bl, s->my - w->r.y - w->bt,
 				       button, 0, qual);
+		else if (!w && s->root_button)
+			s->root_button(s, s->mx, s->my, button, 0, qual);
 		return;
 	}
 	s->mode = M_NONE;
 	s->grab = NULL;
 	switch (mode) {
+	case M_ROOT:
+		if (s->root_button)
+			s->root_button(s, s->mx, s->my, 1, 0, qual);
+		break;
 	case M_BARDEPTH:
 		if (s->bar_depth_pressed) {
 			s->bar_depth_pressed = 0;
@@ -1250,6 +1273,8 @@ void wm_key(struct screen *s, const struct keyev *k)
 
 	if (w && w->ops && w->ops->key)
 		w->ops->key(w, k);
+	else if (!w && s->root_key)
+		s->root_key(s, k);
 }
 
 void wm_tick(struct screen *s, uint64_t now)

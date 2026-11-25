@@ -60,8 +60,8 @@ struct disp_ops {
 /*
  * What the display shows: the front screen's composition (src: d->fb for
  * the Workbench screen, a client screen's own), screen pixel (x, y) at
- * display pixel (ox + x * sx, oy + y * sy).  Outside it, the screen's
- * colour 0, as an Amiga shows its border.
+ * display pixel (ox + x * sx, oy + y * sy).  Outside it, black (the
+ * software display, whose palette is the screen's, takes its darkest pen).
  */
 struct disp_view {
 	struct bm *src;
@@ -75,6 +75,7 @@ struct disp {
 	struct bm fb;		/* the logical screen, what wbde draws */
 	int scale;		/* rows are shown this many times over */
 	int mw, mh;		/* the display mode */
+	int border_pen;		/* the software display's darkest pen, for the border */
 	struct disp_view view;
 	int composes;		/* ops->compose, not software composition */
 	int hw_pointer;		/* the pointer is not drawn into the screen */

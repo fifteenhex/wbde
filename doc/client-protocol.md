@@ -106,6 +106,8 @@ Events sent, when the client asked for the class:
 | `IDCMP_MENUPICK` | a menu item chosen | the item's id |
 | `IDCMP_ACTIVEWINDOW`, `IDCMP_INACTIVEWINDOW` | activation | 0 |
 
+As in Intuition, the qualifier carries the mouse buttons held.
+
 ## Pens and colour
 
 The buffer holds pens, not colours.  Pens 0-7 are the Workbench's (the
@@ -192,6 +194,8 @@ them.
 | `WBP_SCREEN_TITLE` | `int32_t` showtitle (1, 0, or -1 unchanged), then the title | - |
 | `WBP_SCREEN_TO_FRONT`, `WBP_SCREEN_TO_BACK` | - | - |
 | `WBP_SCREEN_CLOSE` | - | its windows go with it |
+| `WBP_SCREEN_MENUS` | `wbp_menuitem[]` | - |
+| `WBP_SCREEN_FLAGS` | `uint32_t` `WBP_SCF_*` | - |
 
 `win` in the header is the screen id for all of these.
 
@@ -209,6 +213,12 @@ them.
   are a buffer of pens like a window's (`wbp_screenbuf` has the size,
   stride and bytes to map), and `WBP_SCREEN_DAMAGE` says where it
   changed.
+- The screen's own pixels take input as an Intuition backdrop window
+  drawing into the screen's bitmap would: buttons, moves and keys where
+  there is no window, or none is active, come as `WBP_EVENT` with `win`
+  = `WBP_SCREEN_EVENT` | the screen id, in screen coordinates.  There
+  the right button shows the `WBP_SCREEN_MENUS`, or with
+  `WBP_SCF_RMBTRAP` is an event itself.
 - Windows open on it with `wbp_open.screen` = its id (a `wbp_open` without
   that field, as version 1 clients send it, is on Workbench).  They are
   ordinary wbde windows with wbde's frames.
