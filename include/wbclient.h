@@ -7,6 +7,11 @@
  *   ... draw into w.pixels (w.stride bytes a row, pens) ...
  *   wbc_damage(&c, &w, 0, 0, w.width, w.height);
  *   struct wbp_event e;  while (wbc_wait(&c, &e, -1) > 0) ...
+ *
+ * With a GPU display, two more ways to fill a window (see client-protocol.md):
+ * WBP_WF_VRAM in wbc_open's flags puts w.pixels in video memory (w.vram is
+ * then set: write, never read), and wbc_attach() shows a GPU buffer the
+ * client owns (a dma-buf) as the window's content.
  */
 #ifndef WBCLIENT_H
 #define WBCLIENT_H
@@ -31,6 +36,7 @@ struct wbc_window {
 	uint8_t *pixels;
 	size_t size;
 	int changed;		/* a new buffer arrived (resize): redraw */
+	int vram;		/* pixels are in video memory: writes only */
 };
 
 struct wbc {
@@ -48,15 +54,34 @@ struct wbc {
 	int npending;
 };
 
-static inline int wbc__send(struct wbc *c, uint32_t type, uint32_t win, const void *p, uint32_t len)
+static inline int wbc__send_fd(struct wbc *c, uint32_t type, uint32_t win, const void *p,
+				uint32_t len, int fd)
 {
 	struct wbp_hdr h = { type, len, win, ++c->serial };
 	struct iovec iov[2] = { { &h, sizeof(h) }, { (void *)p, len } };
+	char cbuf[CMSG_SPACE(sizeof(int))];
 	struct msghdr m = { 0 };
 
 	m.msg_iov = iov;
 	m.msg_iovlen = len ? 2 : 1;
+	if (fd >= 0) {
+		struct cmsghdr *cm;
+
+		memset(cbuf, 0, sizeof(cbuf));
+		m.msg_control = cbuf;
+		m.msg_controllen = sizeof(cbuf);
+		cm = CMSG_FIRSTHDR(&m);
+		cm->cmsg_level = SOL_SOCKET;
+		cm->cmsg_type = SCM_RIGHTS;
+		cm->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(cm), &fd, sizeof(int));
+	}
 	return sendmsg(c->fd, &m, MSG_NOSIGNAL) == (ssize_t)(sizeof(h) + len) ? 0 : -1;
+}
+
+static inline int wbc__send(struct wbc *c, uint32_t type, uint32_t win, const void *p, uint32_t len)
+{
+	return wbc__send_fd(c, type, win, p, len, -1);
 }
 
 /* read one message (blocking), with an fd if one came along */
@@ -124,6 +149,7 @@ static inline void wbc__window(struct wbc *c, struct wbc_window *w, const struct
 	w->height = m->height;
 	w->stride = m->stride;
 	w->size = m->size;
+	w->vram = (m->flags & WBP_WIN_VRAM) != 0;
 	w->pixels = mmap(NULL, w->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (w->pixels == MAP_FAILED)
 		w->pixels = NULL;
@@ -243,6 +269,36 @@ static inline int wbc_open(struct wbc *c, struct wbc_window *w, int left, int to
 	c->wins[i] = w;
 	wbc__window(c, w, &m, fd);
 	return 0;
+}
+
+/*
+ * Show a GPU buffer (a dma-buf: `fd`, which the caller keeps) as w's content,
+ * width x height pixels of WBP_FMT_*, `pitch` bytes a row from `offset`,
+ * scaled to the inner area.  wbc_damage then says it changed.  -ENOTSUP
+ * without a GPU display.  fd < 0 goes back to the window's own buffer.
+ */
+static inline int wbc_attach(struct wbc *c, struct wbc_window *w, int fd, uint32_t format,
+			     int width, int height, uint32_t pitch, uint32_t offset)
+{
+	struct wbp_attach a = { format, (uint16_t)width, (uint16_t)height, pitch, offset };
+	struct wbp_hdr h;
+	void *pl;
+	int rfd;
+
+	if (wbc__send_fd(c, WBP_ATTACH, w->id, &a, sizeof(a), fd))
+		return -1;
+	for (;;) {
+		if (wbc__recv(c, &h, &pl, &rfd) <= 0)
+			return -1;
+		if (h.serial == c->serial && (h.type == WBP_ATTACHED || h.type == WBP_ERROR)) {
+			int ret = h.type == WBP_ERROR ? *(int32_t *)pl : 0;
+
+			wbc__consume(c, &h);
+			return ret;
+		}
+		wbc__other(c, &h, pl, rfd);
+		wbc__consume(c, &h);
+	}
 }
 
 static inline int wbc_damage(struct wbc *c, struct wbc_window *w, int x, int y, int width, int height)

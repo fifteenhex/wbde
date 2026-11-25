@@ -35,6 +35,7 @@ enum wbp_type {
 	WBP_SET_POINTER,	/* uint32_t: 0 normal, 1 busy */
 	WBP_OBTAIN_PEN,		/* uint8_t rgb[3] -> WBP_PEN */
 	WBP_GET_FONT,		/* -> WBP_FONT */
+	WBP_ATTACH,		/* wbp_attach + a dma-buf fd (none: detach) -> WBP_ATTACHED */
 
 	/* server to client */
 	WBP_SCREEN = 64,	/* wbp_screen */
@@ -43,6 +44,7 @@ enum wbp_type {
 	WBP_PEN,		/* uint32_t pen */
 	WBP_FONT,		/* wbp_font, then glyphs, then chardata */
 	WBP_ERROR,		/* int32_t -errno for the request with this serial */
+	WBP_ATTACHED,		/* (empty) the window shows the attached buffer */
 };
 
 struct wbp_hdr {
@@ -86,6 +88,8 @@ struct wbp_screen {
 #define WBP_WF_RMBTRAP		0x0200
 #define WBP_WF_ACTIVATE		0x10000	/* activate when opened */
 #define WBP_WF_REPORTMOUSE	0x20000	/* MOUSEMOVE while active, not only while dragging */
+#define WBP_WF_VRAM		0x40000	/* the buffer in video memory, if the display composes:
+					   writes go straight to the card, reads are slow */
 
 struct wbp_open {
 	int16_t left, top;		/* outer position on the screen */
@@ -101,8 +105,28 @@ struct wbp_window {
 	uint16_t width, height;		/* inner: the buffer's size */
 	uint16_t stride;		/* bytes per buffer row */
 	uint16_t bl, bt, br, bb;	/* borders around it */
-	uint16_t pad;
+	uint16_t flags;			/* WBP_WIN_* */
 	uint32_t size;			/* bytes to mmap */
+};
+
+#define WBP_WIN_VRAM		0x0001	/* this buffer is in video memory (asked with WBP_WF_VRAM) */
+
+/*
+ * WBP_ATTACH: the window's inner area shows a buffer the client shares as
+ * a dma-buf (a GPU buffer object: its own, or one a card on the bus writes
+ * into), scaled to the inner size by the display; WBP_DAMAGE says it
+ * changed.  Only a composing (GPU) display can: others answer -ENOTSUP.
+ * Sent with no fd, the window goes back to its own buffer.
+ */
+#define WBP_FMT_PENS		0	/* a byte a pixel, the screen's pens */
+#define WBP_FMT_XRGB8888	1	/* native 0x00RRGGBB longwords: true colour */
+
+struct wbp_attach {
+	uint32_t format;		/* WBP_FMT_* */
+	uint16_t width, height;		/* pixels */
+	uint32_t pitch;			/* bytes a row (the card's alignment: 256 pixels
+					   for pens, 64 for XRGB8888) */
+	uint32_t offset;		/* of pixel 0,0 in the buffer, 256-aligned */
 };
 
 struct wbp_rect {

@@ -3,9 +3,17 @@
  * in the Workbench pens with the screen's own topaz, follows the mouse,
  * redraws when sized, has a menu, and goes when its close gadget is hit.
  * amigafmt's intuition.library talks to wbde the same way.
+ *
+ *   wbclient-demo [--vram] [--bench N] [socket]
+ *
+ * --vram asks for the window buffer in video memory (a GPU display only:
+ * the drawing below goes straight to the card), --bench N redraws the
+ * window N times, 20 ms apart, and says what drawing a frame cost here.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "wbclient.h"
 
@@ -53,22 +61,51 @@ int main(int argc, char **argv)
 		{ WBP_ITEM, 0, 'Q', 0, 2, 0, "Quit" },
 	};
 	struct wbp_event e;
-	uint32_t win;
+	uint32_t win, vram = 0;
+	const char *sock = NULL;
+	int a, bench = 0;
 
-	if (wbc_connect(&C, argc > 1 ? argv[1] : NULL, "wbclient-demo")) {
+	for (a = 1; a < argc; a++) {
+		if (!strcmp(argv[a], "--vram"))
+			vram = WBP_WF_VRAM;
+		else if (!strcmp(argv[a], "--bench") && a + 1 < argc)
+			bench = atoi(argv[++a]);
+		else
+			sock = argv[a];
+	}
+	if (wbc_connect(&C, sock, "wbclient-demo")) {
 		fprintf(stderr, "wbclient-demo: is wbde running?\n");
 		return 1;
 	}
 	wbc_get_font(&C);
-	if (wbc_open(&C, &W, 120, 60, 260, 80,
+	if (wbc_open(&C, &W, 120, 60, bench ? 400 : 260, bench ? 150 : 80,
 		     WBP_WF_CLOSE | WBP_WF_DEPTH | WBP_WF_ZOOM | WBP_WF_SIZE | WBP_WF_DRAG |
-		     WBP_WF_ACTIVATE,
+		     WBP_WF_ACTIVATE | vram,
 		     IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS | IDCMP_NEWSIZE | IDCMP_MENUPICK |
 		     IDCMP_VANILLAKEY, "wbclient demo")) {
 		fprintf(stderr, "wbclient-demo: no window\n");
 		return 1;
 	}
 	wbc_set_menus(&C, &W, menus, 4);
+	if (bench) {
+		struct timespec t0, t1;
+		double sum = 0;
+		int i;
+
+		for (i = 0; i < bench; i++) {
+			clock_gettime(CLOCK_MONOTONIC, &t0);
+			pattern ^= 1;
+			draw();
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			sum += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+			while (wbc_wait(&C, &e, &win, 20) > 0)
+				;
+		}
+		printf("wbclient-demo: %dx%d buffer %s, %d frames, %.2f ms a frame to draw\n",
+		       W.width, W.height, W.vram ? "in VRAM" : "in RAM (memfd)", bench, sum / bench);
+		wbc_close(&C, &W);
+		return 0;
+	}
 	draw();
 	while (wbc_wait(&C, &e, &win, -1) > 0) {
 		switch (e.class) {

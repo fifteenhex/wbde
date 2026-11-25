@@ -17,6 +17,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "disp.h"
 #include "font.h"
 #include "menu.h"
 #include "server.h"
@@ -36,6 +37,8 @@ struct cwin {
 	uint8_t *shm;
 	size_t shmsize;
 	struct bm view;		/* the shared buffer as a bitmap */
+	int vram;		/* the buffer is the display's, in VRAM (WBP_WF_VRAM) */
+	int attached;		/* the content is a buffer the client attached */
 	uint32_t idcmp;
 	/* menus the client gave */
 	struct menustrip strip;
@@ -51,6 +54,7 @@ struct client {
 	size_t rlen;
 	struct cwin *wins;
 	int dead;
+	int fd_in;		/* the last fd the client sent, for WBP_ATTACH */
 };
 
 static struct screen *S;
@@ -151,12 +155,42 @@ static void send_event(struct cwin *cw, uint32_t class, uint16_t code, unsigned 
 
 /* --- shared buffers --- */
 
+/*
+ * The buffer in VRAM: the display's own texture, handed to the client as a
+ * dma-buf.  wbde never maps it (reading VRAM costs a microsecond and a
+ * half a longword); the display draws it as the window's content.  After a
+ * resize the new one starts at pen 0: copying the old would mean reading it.
+ */
+static int make_vram_buffer(struct cwin *cw, int w, int h)
+{
+	struct disp_buf b;
+	uint32_t size;
+	int fd, ret;
+
+	ret = disp_share(disp_current, cw->w, DISP_BUF_PENS, w > 0 ? w : 1, h > 0 ? h : 1, &fd,
+			 &b, &size);
+	if (ret)
+		return ret;
+	if (cw->memfd >= 0)
+		close(cw->memfd);
+	cw->memfd = fd;
+	cw->shm = NULL;
+	cw->shmsize = size;
+	cw->view.px = NULL;
+	cw->view.w = b.width;
+	cw->view.h = b.height;
+	cw->view.stride = b.pitch;
+	return 0;
+}
+
 static int make_buffer(struct cwin *cw, int w, int h)
 {
 	int stride = (w + 3) & ~3, fd;
 	size_t size = (size_t)stride * (h > 0 ? h : 1);
 	uint8_t *p;
 
+	if (cw->vram)
+		return make_vram_buffer(cw, w, h);
 	fd = memfd_create("wbde-window", MFD_CLOEXEC);
 	if (fd < 0)
 		return -errno;
@@ -203,7 +237,7 @@ static void send_window(struct cwin *cw, uint32_t serial)
 	m.bt = (uint16_t)w->bt;
 	m.br = (uint16_t)w->br;
 	m.bb = (uint16_t)w->bb;
-	m.pad = 0;
+	m.flags = cw->vram ? WBP_WIN_VRAM : 0;
 	m.size = (uint32_t)cw->shmsize;
 	send_msg(cw->c, WBP_WINDOW, cw->id, serial, &m, sizeof(m), cw->memfd);
 }
@@ -214,6 +248,11 @@ static void cw_draw(struct win *w, struct rp *rp)
 {
 	struct cwin *cw = w->priv;
 
+	/* content the display draws itself (VRAM): nothing of it here */
+	if (cw->vram || cw->attached || !cw->view.px) {
+		rp_fill(rp, 0, 0, rp->clip.w, rp->clip.h, S->pens[P_BACKGROUND]);
+		return;
+	}
 	rp_blit(rp, 0, 0, &cw->view, 0, 0, cw->view.w, cw->view.h, -1);
 }
 
@@ -260,7 +299,7 @@ static void cw_resized(struct win *w)
 	/* do_open's own win_move_size gets here before there is a buffer:
 	   do_open makes it and answers WBP_OPEN with it.  Sending one now
 	   as well would give the client a stale buffer behind the real one. */
-	if (!cw->shm)
+	if (cw->memfd < 0)
 		return;
 	win_inner(w, &in);
 	if (make_buffer(cw, in.w, in.h))
@@ -391,7 +430,7 @@ static void destroy_win(struct cwin *cw)
 			break;
 		}
 	if (cw->w)
-		win_close(S, cw->w);
+		win_close(S, cw->w);	/* and the display's content with it */
 	cw->w = NULL;
 	free_menus(cw);
 	if (cw->shm)
@@ -481,6 +520,8 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	cw->id = next_id++;
 	cw->memfd = -1;
 	cw->idcmp = o->idcmp;
+	/* in VRAM only if asked and the display composes; else the usual memfd */
+	cw->vram = (o->flags & WBP_WF_VRAM) && disp_current && disp_current->ops->share;
 	/* the client gives the inner size; borders are the window core's business */
 	r = rect_make(o->left, o->top, o->width, o->height);
 	cw->w = win_open(S, &r, flags, title, &cw_ops, cw);
@@ -503,6 +544,10 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	win_move_size(S, cw->w, &r);
 	win_inner(cw->w, &in);
 	ret = make_buffer(cw, in.w, in.h);
+	if (ret && cw->vram) {		/* no VRAM to be had: the ordinary buffer */
+		cw->vram = 0;
+		ret = make_buffer(cw, in.w, in.h);
+	}
 	if (ret) {
 		win_close(S, cw->w);
 		free(cw);
@@ -522,16 +567,68 @@ static void do_damage(struct cwin *cw, const struct wbp_rect *r)
 	struct rp rp;
 	struct rect in, d;
 
-	rp_init(&rp, &cw->w->bm);
 	win_inner(cw->w, &in);
-	rp_clip(&rp, &in);
-	rp.ox = in.x;
-	rp.oy = in.y;
-	rp_blit(&rp, r->x, r->y, &cw->view, r->x, r->y, r->w, r->h, -1);
+	if (cw->w->ext) {
+		/* the display draws the client's buffer itself: no copy, just where */
+		if (cw->attached) {
+			/* an attached buffer is scaled to the inner area: all of it */
+			d = rect_make(cw->w->r.x + in.x, cw->w->r.y + in.y, in.w, in.h);
+			screen_damage(S, &d);
+			return;
+		}
+	} else {
+		rp_init(&rp, &cw->w->bm);
+		rp_clip(&rp, &in);
+		rp.ox = in.x;
+		rp.oy = in.y;
+		rp_blit(&rp, r->x, r->y, &cw->view, r->x, r->y, r->w, r->h, -1);
+	}
 	d = rect_make(cw->w->r.x + in.x + r->x, cw->w->r.y + in.y + r->y, r->w, r->h);
 	if (!rect_intersect(&d, &d, &cw->w->r))
 		return;
 	screen_damage(S, &d);
+}
+
+/*
+ * A buffer the client shares becomes the window's content (a GPU buffer
+ * object: a G3 card's frame in VRAM, a GPU client's picture).  The fd came
+ * with the message, or before it.
+ */
+static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h,
+		      const struct wbp_attach *a)
+{
+	struct disp_buf b;
+	int fd = c->fd_in, ret;
+
+	c->fd_in = -1;
+	if (!cw || !a) {
+		if (fd >= 0)
+			close(fd);
+		send_error(c, h, EINVAL);
+		return;
+	}
+	if (fd < 0) {			/* detach: back to the window's own buffer */
+		disp_detach(disp_current, cw->w);
+		cw->attached = 0;
+		win_refresh(S, cw->w);
+		send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
+		return;
+	}
+	b.format = a->format == WBP_FMT_XRGB8888 ? DISP_BUF_XRGB8888 :
+		   a->format == WBP_FMT_PENS ? DISP_BUF_PENS : -1;
+	b.width = a->width;
+	b.height = a->height;
+	b.pitch = (int)a->pitch;
+	b.offset = a->offset;
+	ret = b.format < 0 ? -EINVAL : disp_attach(disp_current, cw->w, fd, &b);
+	close(fd);			/* the display holds its own reference */
+	if (ret) {
+		send_error(c, h, -ret);
+		return;
+	}
+	cw->attached = 1;
+	win_refresh(S, cw->w);
+	send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
 }
 
 static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
@@ -610,6 +707,10 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 	case WBP_GET_FONT:
 		send_font(c, h->serial);
 		break;
+	case WBP_ATTACH:
+		do_attach(c, cw, h, h->len >= sizeof(struct wbp_attach) ?
+				   (const struct wbp_attach *)p : NULL);
+		break;
 	default:
 		send_error(c, h, ENOSYS);
 		break;
@@ -622,6 +723,8 @@ static void drop_client(int i)
 
 	while (c->wins)
 		destroy_win(c->wins);
+	if (c->fd_in >= 0)
+		close(c->fd_in);
 	close(c->fd);
 	free(c->rbuf);
 	free(c);
@@ -686,7 +789,26 @@ static void read_client(int i)
 	struct client *c = clients[i];
 	ssize_t got;
 
-	got = read(c->fd, c->rbuf + c->rlen, RBUF - c->rlen);
+	{
+		/* with an fd now and then (WBP_ATTACH): the latest is kept for it */
+		char cbuf[CMSG_SPACE(sizeof(int))];
+		struct iovec iov = { c->rbuf + c->rlen, RBUF - c->rlen };
+		struct msghdr m = { 0 };
+		struct cmsghdr *cm;
+
+		m.msg_iov = &iov;
+		m.msg_iovlen = 1;
+		m.msg_control = cbuf;
+		m.msg_controllen = sizeof(cbuf);
+		got = recvmsg(c->fd, &m, MSG_CMSG_CLOEXEC);
+		for (cm = got > 0 ? CMSG_FIRSTHDR(&m) : NULL; cm; cm = CMSG_NXTHDR(&m, cm)) {
+			if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
+				if (c->fd_in >= 0)
+					close(c->fd_in);
+				memcpy(&c->fd_in, CMSG_DATA(cm), sizeof(int));
+			}
+		}
+	}
 	if (got <= 0) {
 		if (got < 0 && errno == EAGAIN)
 			return;
@@ -740,6 +862,7 @@ void server_service(struct screen *s, const struct pollfd *fds, int n)
 				continue;
 			}
 			clients[i]->fd = fd;
+			clients[i]->fd_in = -1;
 			continue;
 		}
 		for (i = 0; i < MAXCLIENTS; i++)

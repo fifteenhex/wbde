@@ -62,6 +62,7 @@ both ends are on the same machine.  A request that fails is answered with
 | `WBP_SET_POINTER` | `uint32_t` 0 normal, 1 busy (accepted, not shown) | - |
 | `WBP_OBTAIN_PEN` | `uint8_t rgb[3]` | `WBP_PEN`: `uint32_t` pen |
 | `WBP_GET_FONT` | - | `WBP_FONT` |
+| `WBP_ATTACH` | `wbp_attach` + a dma-buf fd (none: detach) | `WBP_ATTACHED` (see GPU buffers) |
 
 `wbp_open` gives the outer position, the inner size and its limits, the
 `WBP_WF_*` flags (the Intuition window flags a client can have: `CLOSE`,
@@ -144,6 +145,37 @@ For a project, argv is `{ default tool, project }`, with the default
 tool's `SYS:` path mapped onto the System partition's mount point.  The
 tool types are in the `.info`; the current directory is the icon's
 drawer.
+
+## GPU buffers
+
+With the GPU display a window's content can live in video memory, so that
+the CPU never copies it.  Clients that do not ask see none of this.
+
+`WBP_WF_VRAM` (`0x40000`) in `wbp_open.flags`: the window buffer is a pens
+texture in VRAM and the fd that comes with `WBP_WINDOW` is its dma-buf
+(map it as before; `wbp_window.flags` has `WBP_WIN_VRAM`).  The client's
+stores are the upload, and wbde copies nothing on `WBP_DAMAGE`, it only
+redraws.  Reading the buffer is slow (about 1.4 us a longword on an
+A4000's Radeon), so draw and never read back: no ScrollRaster in it.
+After a resize the new buffer starts as pen 0, not as a copy of the old
+one.  Without the GPU display, or when VRAM cannot be had, the client
+gets the ordinary memfd and no `WBP_WIN_VRAM`.  Each store crosses the
+bus, so this is worth it for a client that stores longwords or writes
+each pixel once, and not for one that draws byte by byte.
+
+`WBP_ATTACH` with a dma-buf fd and a `wbp_attach { format, width, height,
+pitch, offset }`: the inner area shows that buffer, scaled to fit, until
+the window closes or another `WBP_ATTACH` comes without an fd.  The
+formats are `WBP_FMT_PENS` (a byte a pixel, the screen's pens) and
+`WBP_FMT_XRGB8888` (native `0x00RRGGBB` longwords: true colour, no pens
+taken).  The pitch is in bytes, aligned as the card wants (256 pixels for
+pens, 64 for XRGB8888), and the offset is 256-aligned.  The answer is
+`WBP_ATTACHED`, or `WBP_ERROR` (`-ENOTSUP` without the GPU display).
+`WBP_DAMAGE`, with any rectangle, says the buffer changed, and the whole
+inner area is redrawn from it.  The buffer must be on the same card: a
+GEM object exported with `DRM_IOCTL_PRIME_HANDLE_TO_FD`, for example from
+the render node, or a frame that another card writes into VRAM over PCI.
+`wbclient.h` has `wbc_attach()`.
 
 ## Not provided
 
