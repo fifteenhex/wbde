@@ -69,3 +69,6 @@ executable('wbde', core + disp,
   install: true)
 
 executable('wbrom', 'tools/wbrom.c', readers, include_directories: inc)
+
+install_data('scripts/wbde.sh', install_dir: get_option('bindir'),
+             install_mode: 'rwxr-xr-x')
