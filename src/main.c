@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "con.h"
 #include "disp.h"
 #include "font.h"
 #include "menu.h"
@@ -22,7 +23,7 @@
 static struct disp D;
 static struct screen S;
 static struct wbenv ENV;
-static volatile sig_atomic_t got_quit, got_shot;
+static volatile sig_atomic_t got_chld, got_quit, got_shot;
 static uint64_t vclock;		/* scripted runs keep their own time */
 static int scripted;
 
@@ -38,7 +39,9 @@ static uint64_t now_ms(void)
 
 static void on_signal(int sig)
 {
-	if (sig == SIGUSR1)
+	if (sig == SIGCHLD)
+		got_chld = 1;
+	else if (sig == SIGUSR1)
 		got_shot = 1;
 	else
 		got_quit = 1;
@@ -171,8 +174,17 @@ static int run_script(const char *path)
 			cb_button(&S, 2, 0);
 		} else if (sscanf(line, "wait %d", &a) == 1) {
 			uint64_t until = vclock + (uint64_t)a;
+			struct pollfd fds[16];
+			int n;
 
 			while (vclock < until) {
+				n = con_pollfds(fds, 16);
+				poll(fds, (nfds_t)n, 10);
+				con_service(&S, fds, n);
+				if (got_chld) {
+					got_chld = 0;
+					con_reap(&S);
+				}
 				vclock += 10;
 				wm_tick(&S, vclock);
 			}
@@ -232,6 +244,7 @@ int main(int argc, char **argv)
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_signal;
+	sigaction(SIGCHLD, &sa, NULL);
 	sigaction(SIGUSR1, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
@@ -253,8 +266,21 @@ int main(int argc, char **argv)
 	}
 
 	while (!got_quit) {
-		poll(NULL, 0, 500);
-		wm_tick(&S, now_ms());
+		struct pollfd fds[32];
+		int nc, timeout;
+		uint64_t now;
+
+		nc = con_pollfds(fds, 32);
+		timeout = wm_busy(&S) ? 20 : 500;
+		if (poll(fds, (nfds_t)nc, timeout) < 0 && errno != EINTR)
+			break;
+		now = now_ms();
+		con_service(&S, fds, nc);
+		if (got_chld) {
+			got_chld = 0;
+			con_reap(&S);
+		}
+		wm_tick(&S, now);
 		flush();
 		if (got_shot) {
 			got_shot = 0;

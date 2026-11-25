@@ -41,7 +41,8 @@ inc = include_directories('src')
 
 readers = files('src/rom.c', 'src/font.c', 'src/gfx.c', 'src/iff.c', 'src/icon.c',
                 'src/hunk.c')
-core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/main.c')
+core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/con.c',
+                       'src/main.c')
 
 # One display, picked at build time: smol2d on DRM, or memory only
 if get_option('soft')
@@ -58,8 +59,11 @@ else
   disp_inc = []
 endif
 
+util = cc.find_library('util')
+
 executable('wbde', core + disp,
   include_directories: [inc, disp_inc],
+  dependencies: util,
   install: true)
 
 executable('wbrom', 'tools/wbrom.c', readers, include_directories: inc)
