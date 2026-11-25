@@ -18,8 +18,12 @@ if host_machine.cpu_family() == 'm68k'
 endif
 
 # The smol* libraries are used from their source checkouts
+need = ['smolinput']
+if get_option('soft')
+  need += ['smol2d', 'smoldrm']
+endif
 smol = {}
-foreach name : ['smol2d', 'smoldrm', 'smolinput']
+foreach name : need
   # resolved here: meson refuses a path into the source tree that only
   # leaves it again through '..', as the default '../<name>' does
   dir = get_option(name)
@@ -34,35 +38,33 @@ foreach name : ['smol2d', 'smoldrm', 'smolinput']
     endforeach
     dir = p
   endif
+  if not fs.is_dir(dir)
+    error('@0@ not found at @1@ (-D@0@=DIR)'.format(name, dir))
+  endif
   smol += {name: dir}
 endforeach
 
 inc = include_directories('src')
+smol_inc = [include_directories(smol['smolinput'], is_system: true)]
 
 readers = files('src/rom.c', 'src/font.c', 'src/gfx.c', 'src/iff.c', 'src/icon.c',
                 'src/hunk.c')
 core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/wb.c',
-                       'src/con.c', 'src/main.c')
+                       'src/input.c', 'src/con.c', 'src/main.c')
 
 # One display, picked at build time: smol2d on DRM, or memory only
 if get_option('soft')
-  foreach name : ['smol2d', 'smoldrm', 'smolinput']
-    if not fs.is_dir(smol[name])
-      error('@0@ not found at @1@ (-D@0@=DIR)'.format(name, smol[name]))
-    endif
-  endforeach
   disp = files('src/disp_soft.c', smol['smol2d'] / 'libsmol2ddrm/src/smol2ddrm.c')
-  disp_inc = include_directories(smol['smol2d'] / 'include', smol['smoldrm'],
-                                 smol['smolinput'], is_system: true)
+  smol_inc += include_directories(smol['smol2d'] / 'include', smol['smoldrm'],
+                                  is_system: true)
 else
   disp = files('src/disp_file.c')
-  disp_inc = []
 endif
 
 util = cc.find_library('util')
 
 executable('wbde', core + disp,
-  include_directories: [inc, disp_inc],
+  include_directories: [inc, smol_inc],
   dependencies: util,
   install: true)
 

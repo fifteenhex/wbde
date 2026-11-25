@@ -16,6 +16,7 @@
 #include "con.h"
 #include "disp.h"
 #include "font.h"
+#include "input.h"
 #include "menu.h"
 #include "prefs.h"
 #include "wb.h"
@@ -92,21 +93,38 @@ static void cb_button(void *arg, int button, int down)
 			struct win *w = win_at(s, s->mx, s->my);
 
 			if (w && (w->flags & WF_RMBTRAP)) {
-				wm_button(s, button, down, 0, now);
+				wm_button(s, button, down, input_qual(), now);
 				return;
 			}
 			menu_open(s, strip_for(s));
 		} else if (!down && menu_is_open()) {
 			menu_close(s);
 		} else if (!menu_is_open()) {
-			wm_button(s, button, down, 0, now);
+			wm_button(s, button, down, input_qual(), now);
 		}
 		return;
 	}
 	if (menu_is_open())
 		return;
-	wm_button(s, button, down, 0, now);
+	wm_button(s, button, down, input_qual(), now);
 }
+
+static void cb_key(void *arg, const struct keyev *k)
+{
+	struct screen *s = arg;
+
+	if (k->down == 1 && (k->qual & QUAL_RAMIGA) && k->ch && !menu_is_open()) {
+		if (menu_shortcut(strip_for(s), k->ch))
+			return;
+	}
+	if (k->down && (k->qual & QUAL_LAMIGA) && (k->ch == 'm' || k->ch == 'n')) {
+		/* LAmiga-M/N flip screens; there is only one */
+		return;
+	}
+	wm_key(s, k);
+}
+
+static const struct input_cb CB = { cb_motion, cb_button, cb_key, &S };
 
 static void flush(void)
 {
@@ -133,7 +151,7 @@ static void shot(const char *path)
 /*
  * Scripts drive wbde without a mouse, for testing away from the machine:
  *   move X Y | down B | up B | click X Y | dclick X Y | menu X Y X2 Y2 |
- *   wait MS | shot FILE | quit
+ *   key CODE [QUAL] | type TEXT | wait MS | shot FILE | quit
  */
 static int run_script(const char *path)
 {
@@ -178,6 +196,23 @@ static int run_script(const char *path)
 				continue;
 			}
 			cb_button(&S, 2, 0);
+		} else if (sscanf(line, "key %d %d", &a, &b) >= 1) {
+			struct keyev k = { (uint16_t)a, 1, 0, 0 };
+
+			if (sscanf(line, "key %d %d", &a, &b) == 2)
+				k.qual = (unsigned int)b;
+			k.ch = input_keychar(a, k.qual);
+			cb_key(&S, &k);
+			k.down = 0;
+			cb_key(&S, &k);
+		} else if (sscanf(line, "type %399[^\n]", arg) == 1) {
+			char *p;
+
+			for (p = arg; *p; p++) {
+				struct keyev k = { 0, 1, (unsigned char)*p, 0 };
+
+				cb_key(&S, &k);
+			}
 		} else if (sscanf(line, "wait %d", &a) == 1) {
 			uint64_t until = vclock + (uint64_t)a;
 			struct pollfd fds[16];
@@ -279,18 +314,26 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	if (input_open())
+		fprintf(stderr, "wbde: no keyboard or mouse\n");
+
 	while (!W.quit && !got_quit) {
-		struct pollfd fds[32];
-		int nc, timeout;
+		struct pollfd fds[64];
+		int ni, nc, timeout;
 		uint64_t now;
 
-		nc = con_pollfds(fds, 32);
+		ni = input_pollfds(fds, 4);
+		nc = con_pollfds(fds + ni, 32);
 		timeout = wm_busy(&S) ? 20 : 500;
-		if (poll(fds, (nfds_t)nc, timeout) < 0 && errno != EINTR)
+		if (input_poll_ms() > 0 && input_poll_ms() < timeout)
+			timeout = input_poll_ms();
+		if (poll(fds, (nfds_t)(ni + nc), timeout) < 0 && errno != EINTR)
 			break;
 		now = now_ms();
 		W.now = now;
-		con_service(&S, fds, nc);
+		input_service(fds, ni, &CB);
+		input_tick(&CB);
+		con_service(&S, fds + ni, nc);
 		if (got_chld) {
 			got_chld = 0;
 			con_reap(&S);
@@ -303,6 +346,7 @@ int main(int argc, char **argv)
 			shot("/tmp/wbde-shot.ppm");
 		}
 	}
+	input_close();
 	disp_close(&D);
 	return 0;
 }
