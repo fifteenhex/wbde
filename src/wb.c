@@ -1638,6 +1638,76 @@ static void find_volumes(struct wb *wb, const char *conf)
 	add_volume(wb, "Linux", "/", WBDISK);
 }
 
+/*
+ * Icons the user left out on the backdrop: a volume's .backdrop lists them,
+ * one ":path/name" a line relative to the volume, and their own snapshot
+ * position is where they sit.
+ */
+static void add_left_out(struct wb *wb, const struct rect *in)
+{
+	int nvol = wb->root.n, v, auto_y = 6;
+
+	for (v = 0; v < nvol && v < wb->nvols; v++) {
+		char path[300], line[256];
+		FILE *f;
+
+		snprintf(path, sizeof(path), "%s/.backdrop", wb->vols[v].path);
+		f = fopen(path, "r");
+		if (!f)
+			continue;
+		while (fgets(line, sizeof(line), f)) {
+			char *rel = line, *nl = strchr(line, '\n'), *full, *base;
+			struct wbicon *ic;
+			struct stat st;
+			char *info;
+			int taken;
+
+			if (nl)
+				*nl = 0;
+			if (*rel == ':')
+				rel++;
+			if (!*rel)
+				continue;
+			full = path_join(wb->vols[v].path, rel);
+			if (!full)
+				continue;
+			base = strrchr(full, '/');
+			*base = 0;
+			info = find_info(full, base + 1);
+			*base = '/';
+			if (!info || stat(full, &st)) {
+				free(info);
+				free(full);
+				continue;
+			}
+			ic = view_add(&wb->root);
+			if (!ic || icon_load(info, &ic->ic, env_pen, wb->env)) {
+				if (ic)
+					wb->root.n--;
+				free(info);
+				free(full);
+				continue;
+			}
+			free(info);
+			ic->path = full;
+			ic->isdir = S_ISDIR(st.st_mode);
+			icon_label(wb, ic, base + 1);
+			wb->root.n--;	/* not itself */
+			taken = view_hit(wb, &wb->root, ic->ic.x + ic->ic.w / 2, ic->ic.y + ic->ic.h / 2) != NULL;
+			wb->root.n++;
+			if (ic->ic.x != ICON_NOPOS && ic->ic.x < in->w - 40 && ic->ic.y < in->h - 20 && !taken) {
+				ic->x = ic->ic.x;
+				ic->y = ic->ic.y;
+			} else {
+				ic->x = 8;
+				ic->y = auto_y;
+				auto_y += icon_h(wb, ic) + 8;
+			}
+		}
+		fclose(f);
+	}
+}
+
 static void build_root(struct wb *wb)
 {
 	struct rect in;
@@ -1661,7 +1731,7 @@ static void build_root(struct wb *wb)
 	}
 	/* disks down the right hand side, as Workbench puts them */
 	win_inner(wb->backdrop, &in);
-	for (i = 0; i < wb->root.n; i++) {
+	for (i = 0; i < wb->nvols && i < wb->root.n; i++) {
 		struct wbicon *ic = &wb->root.icons[i];
 
 		ic->x = in.w - 8 - colw / 2 - ic->ic.w / 2;
@@ -1672,6 +1742,8 @@ static void build_root(struct wb *wb)
 			in.w -= colw + 12;
 		}
 	}
+	win_inner(wb->backdrop, &in);
+	add_left_out(wb, &in);
 	view_extent(wb, &wb->root);
 }
 
