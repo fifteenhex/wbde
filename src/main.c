@@ -57,6 +57,8 @@ static void on_crash(int sig, siginfo_t *si, void *ctx)
 	pc = (unsigned long)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP];
 #endif
 	n = snprintf(buf, sizeof(buf), "wbde: signal %d at pc %08lx, address %p\n", sig, pc, si->si_addr);
+	/* the display back as it was found (the gamma table, the cursor) */
+	disp_emergency(&D);
 	if (write(2, buf, (size_t)n) < 0)
 		_exit(128 + sig);
 	signal(sig, SIG_DFL);
@@ -71,21 +73,6 @@ static void on_signal(int sig)
 		got_shot = 1;
 	else
 		got_quit = 1;
-}
-
-int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char *path)
-{
-	FILE *f = fopen(path, "wb");
-	int x, y;
-
-	if (!f)
-		return -errno;
-	fprintf(f, "P6\n%d %d\n255\n", d->fb.w, d->fb.h * d->scale);
-	for (y = 0; y < d->fb.h * d->scale; y++)
-		for (x = 0; x < d->fb.w; x++)
-			fwrite(pal[d->fb.px[(y / d->scale) * d->fb.stride + x]], 3, 1, f);
-	fclose(f);
-	return 0;
 }
 
 static const struct menustrip *strip_for(struct screen *s)
@@ -200,19 +187,28 @@ static const struct input_cb CB = { cb_motion, cb_button, cb_key, &S };
 
 static void flush(void)
 {
+	static int timing = -1;
+
+	if (timing < 0)
+		timing = getenv("WBDE_TIMING") != NULL;
 	if (ENV.paldirty) {
 		ENV.paldirty = 0;
 		memcpy(S.palette, ENV.pal, sizeof(S.palette));
 		disp_palette(&D, ENV.pal);
 	}
+	if (D.composes) {
+		/* the display draws the damage itself (and moves its pointer) */
+		D.timing[0] = 0;
+		D.ops->compose(&D, &S);
+		if (timing && D.timing[0])
+			fprintf(stderr, "wbde: %s\n", D.timing);
+		return;
+	}
 	if (S.ndamage) {
-		static int timing = -1;
 		struct timespec t0, t1, t2;
 		long area = 0;
 		int i;
 
-		if (timing < 0)
-			timing = getenv("WBDE_TIMING") != NULL;
 		for (i = 0; i < S.ndamage; i++)
 			area += (long)S.damage[i].w * S.damage[i].h;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -230,7 +226,7 @@ static void flush(void)
 static void shot(const char *path)
 {
 	flush();
-	if (disp_screenshot(&D, ENV.pal, path))
+	if (D.ops->shot ? D.ops->shot(&D, &S, path) : disp_screenshot(&D, ENV.pal, path))
 		fprintf(stderr, "wbde: cannot write %s\n", path);
 	else
 		fprintf(stderr, "wbde: screenshot %s\n", path);
@@ -326,6 +322,8 @@ static void command(const char *line)
 		return;
 	} else if (!strncmp(line, "quit", 4)) {
 		W.quit = 1;
+	} else if (!strncmp(line, "redraw", 6)) {
+		screen_damage_all(&S);
 	}
 	flush();
 }
@@ -386,7 +384,8 @@ static void usage(void)
 {
 	fprintf(stderr,
 		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--conf FILE] [--rom FILE]\n"
-		"            [--script FILE] [--socket PATH] [--pattern ILBM] [--drawer-pattern ILBM]\n");
+		"            [--script FILE] [--socket PATH] [--pattern ILBM] [--drawer-pattern ILBM]\n"
+		"            [--display gpu|soft|file]\n");
 }
 
 int main(int argc, char **argv)
@@ -401,15 +400,16 @@ int main(int argc, char **argv)
 		{ "socket", required_argument, NULL, 'k' },
 		{ "pattern", required_argument, NULL, 'p' },
 		{ "drawer-pattern", required_argument, NULL, 'P' },
+		{ "display", required_argument, NULL, 'D' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
 	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *conf = NULL, *script = NULL;
-	const char *sock = NULL, *pattern = NULL, *dpattern = NULL;
+	const char *sock = NULL, *pattern = NULL, *dpattern = NULL, *display = NULL;
 	struct sigaction sa;
 	int o;
 
-	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:k:p:P:h", opts, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:k:p:P:D:h", opts, NULL)) != -1) {
 		switch (o) {
 		case 'm': mode = optarg; break;
 		case 'z': size = optarg; break;
@@ -420,6 +420,7 @@ int main(int argc, char **argv)
 		case 'k': sock = optarg; break;
 		case 'p': pattern = optarg; break;
 		case 'P': dpattern = optarg; break;
+		case 'D': display = optarg; break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -435,7 +436,7 @@ int main(int argc, char **argv)
 		env_logf(&ENV, "backdrop: cannot load %s", pattern);
 	if (dpattern && env_load_pattern(&ENV, 1, dpattern))
 		env_logf(&ENV, "drawer pattern: cannot load %s", dpattern);
-	if (disp_open(&D, mode, size))
+	if (disp_open(&D, display, mode, size))
 		return 1;
 	env_logf(&ENV, "display: %s", D.desc);
 
@@ -460,6 +461,7 @@ int main(int argc, char **argv)
 	}
 
 	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
+	S.hw_pointer = D.hw_pointer;
 	memcpy(S.palette, ENV.pal, sizeof(S.palette));
 	S.flush_now = flush;
 	S.mx = S.w / 2;

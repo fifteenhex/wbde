@@ -491,21 +491,31 @@ void screen_damage_all(struct screen *s)
 	s->damage[0] = rect_make(0, 0, s->w, s->h);
 }
 
-static void composite(struct screen *s, const struct rect *r)
+void (*win_ext_free)(struct win *w);
+
+struct win *screen_cover(struct screen *s, const struct rect *r)
+{
+	struct win *w;
+
+	for (w = s->top; w; w = w->below)
+		if (!w->dead && rect_contains(&w->r, r->x, r->y) &&
+		    rect_contains(&w->r, r->x + r->w - 1, r->y + r->h - 1))
+			return w;
+	return NULL;
+}
+
+void screen_compose(struct screen *s, struct bm *into, const struct rect *r, int pointer)
 {
 	struct rp rp;
 	struct win *w;
 	struct overlay *o;
 	struct rect x;
 
-	rp_init(&rp, s->fb);
+	rp_init(&rp, into);
 	rp_clip(&rp, r);
 
-	/* the lowest opaque window covering the whole rectangle hides all below */
-	for (w = s->top; w; w = w->below)
-		if (!w->dead && rect_contains(&w->r, r->x, r->y) &&
-		    rect_contains(&w->r, r->x + r->w - 1, r->y + r->h - 1))
-			break;
+	/* the topmost opaque window covering the whole rectangle hides all below */
+	w = screen_cover(s, r);
 	if (!w) {
 		rp_blit(&rp, r->x, r->y, &s->root, r->x, r->y, r->w, r->h, -1);
 		w = s->bottom;
@@ -525,9 +535,14 @@ static void composite(struct screen *s, const struct rect *r)
 		rp_xor_rect(&rp, b->x, b->y + 1, 1, b->h - 2, s->xormask);
 		rp_xor_rect(&rp, b->x + b->w - 1, b->y + 1, 1, b->h - 2, s->xormask);
 	}
-	if (s->ptr && !s->ptr_hidden)
+	if (pointer && s->ptr && !s->ptr_hidden)
 		rp_blit(&rp, s->mx - s->ptr_hx, s->my - s->ptr_hy, s->ptr, 0, 0,
 			s->ptr->w, s->ptr->h, s->ptr_key);
+}
+
+static void composite(struct screen *s, const struct rect *r)
+{
+	screen_compose(s, s->fb, r, !s->hw_pointer);
 }
 
 void screen_flush(struct screen *s, void (*touch)(void *arg, const struct rect *r), void *arg)
@@ -548,7 +563,7 @@ static void damage_pointer(struct screen *s)
 {
 	struct rect r;
 
-	if (!s->ptr)
+	if (!s->ptr || s->hw_pointer)
 		return;
 	r = rect_make(s->mx - s->ptr_hx, s->my - s->ptr_hy, s->ptr->w, s->ptr->h);
 	screen_damage(s, &r);
@@ -735,6 +750,8 @@ void win_close(struct screen *s, struct win *w)
 	}
 	damage_win(s, w);
 	unlink_win(s, w);
+	if (w->ext && win_ext_free)
+		win_ext_free(w);
 	bm_free(&w->bm);
 	free(w);
 }

@@ -91,7 +91,16 @@ struct win {
 	int pressed;			/* gadget held down, G_* */
 	int pressed_in;			/* and the pointer is still over it */
 	int dead;			/* closed, freed when it is safe */
+	/*
+	 * A composing display's own content for the inner area (a buffer a
+	 * client shares, in VRAM): drawn over bm's inner part, which then
+	 * only matters to the software composition used for screenshots.
+	 */
+	void *ext;
 };
+
+/* a composing display frees a window's ext here when the window goes */
+extern void (*win_ext_free)(struct win *w);
 
 struct overlay {
 	struct overlay *next;
@@ -127,6 +136,7 @@ struct screen {
 	int ptr_hx, ptr_hy, ptr_key;
 	int mx, my;
 	int ptr_hidden;
+	int hw_pointer;			/* the display shows it: moving it damages nothing */
 	/* what the window core is doing with the mouse */
 	int mode;
 	struct win *grab;
@@ -148,6 +158,10 @@ void screen_damage(struct screen *s, const struct rect *r);
 void screen_damage_all(struct screen *s);
 /* composite every damaged rectangle into fb; calls out for each one */
 void screen_flush(struct screen *s, void (*touch)(void *arg, const struct rect *r), void *arg);
+/* r of the screen composed into `into` (the screen's size), by the CPU */
+void screen_compose(struct screen *s, struct bm *into, const struct rect *r, int pointer);
+/* the topmost live window covering all of r, or NULL: nothing below it shows */
+struct win *screen_cover(struct screen *s, const struct rect *r);
 void screen_set_pointer(struct screen *s, struct bm *ptr, int hx, int hy, int key);
 void screen_add_overlay(struct screen *s, struct overlay *o);
 void screen_remove_overlay(struct screen *s, struct overlay *o);

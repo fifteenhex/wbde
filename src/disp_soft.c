@@ -1,6 +1,6 @@
 /*
- * The real display: smol2d's DRM backend in C8, which on the Radeon is true
- * indexed scan-out with the CRTC's LUT as the palette. smol2d keeps the
+ * The software display: smol2d's DRM backend in C8, which on the Radeon is
+ * true indexed scan-out with the CRTC's LUT as the palette. smol2d keeps the
  * backbuffer in RAM and copies only the damaged rectangles to VRAM at
  * present time, which matters here: every VRAM store is ~0.5 us across the
  * Mediator, and reading VRAM back is slower still.
@@ -18,7 +18,7 @@ struct priv {
 	struct bm phys;		/* smol2d's backbuffer */
 };
 
-int disp_open(struct disp *d, const char *mode, const char *size)
+static int soft_open(struct disp *d, const char *mode, const char *size)
 {
 	struct smol2d_tex *bb;
 	unsigned int stride;
@@ -26,7 +26,6 @@ int disp_open(struct disp *d, const char *mode, const char *size)
 	void *cntx;
 	int w = 0, h = 0;
 
-	memset(d, 0, sizeof(*d));
 	if (mode)
 		setenv("SMOL2D_MODE", mode, 1);
 	if (smol2d_init(&cntx, SMOL2D_CS_C8)) {
@@ -62,7 +61,7 @@ int disp_open(struct disp *d, const char *mode, const char *size)
 	return 0;
 }
 
-void disp_palette(struct disp *d, const uint8_t pal[256][3])
+static void soft_palette(struct disp *d, const uint8_t pal[256][3])
 {
 	struct smol2d_palette p;
 	int i;
@@ -76,9 +75,8 @@ void disp_palette(struct disp *d, const uint8_t pal[256][3])
 	smol2d_setpalette(((struct priv *)d->priv)->cntx, &p);
 }
 
-void disp_touch(void *arg, const struct rect *r)
+static void soft_touch(struct disp *d, const struct rect *r)
 {
-	struct disp *d = arg;
 	struct priv *p = d->priv;
 	struct smol2d_rect sr = { r->x, r->y * d->scale, (unsigned int)r->w,
 				  (unsigned int)(r->h * d->scale) };
@@ -93,20 +91,56 @@ void disp_touch(void *arg, const struct rect *r)
 	smol2d_tex_touch(p->cntx, smol2d_getbackbuffer(p->cntx), &sr);
 }
 
-void disp_present(struct disp *d)
+static void soft_present(struct disp *d)
 {
 	smol2d_present(((struct priv *)d->priv)->cntx);
 }
 
-void disp_close(struct disp *d)
+/*
+ * The palette is the CRTC's gamma table, which the kernel keeps after we
+ * are gone, so that every true-colour program after wbde would show in
+ * Workbench colours.  So whatever way wbde leaves, the table goes back to a
+ * straight ramp (the table it found is not readable through smol2d; a
+ * ramp is what every true-colour program expects, and what the kernel
+ * starts with).
+ */
+static void lut_ramp(struct priv *p)
+{
+	struct smol2d_palette ramp;
+	int i;
+
+	for (i = 0; i < 256; i++)
+		ramp.colours[i].r = ramp.colours[i].g = ramp.colours[i].b = (uint8_t)i;
+	smol2d_setpalette(p->cntx, &ramp);
+}
+
+/* signal handler: two ioctls, nothing allocated */
+static void soft_emergency(struct disp *d)
+{
+	if (d->priv)
+		lut_ramp(d->priv);
+}
+
+static void soft_close(struct disp *d)
 {
 	struct priv *p = d->priv;
 
 	if (!p)
 		return;
+	lut_ramp(p);
 	if (d->scale > 1)
 		bm_free(&d->fb);
 	smol2d_close(p->cntx);
 	free(p);
 	d->priv = NULL;
 }
+
+const struct disp_ops disp_soft_ops = {
+	.name = "soft",
+	.open = soft_open,
+	.palette = soft_palette,
+	.touch = soft_touch,
+	.present = soft_present,
+	.close = soft_close,
+	.emergency = soft_emergency,
+};
