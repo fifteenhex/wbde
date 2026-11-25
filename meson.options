@@ -1,0 +1,2 @@
+option('cpu', type: 'combo', choices: ['68040', '68060'], value: '68040',
+       description: 'm68k CPU to compile for')
