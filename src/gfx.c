@@ -134,6 +134,22 @@ void rp_bevel(struct rp *rp, int x, int y, int w, int h, int shine, int shadow)
 	rp_vline(rp, x + w - 1, y + 1, h - 1, shadow);
 }
 
+void rp_frame_button(struct rp *rp, int x, int y, int w, int h, int shine, int shadow)
+{
+	rp_hline(rp, x, y, w - 1, shine);
+	rp_fill(rp, x, y, 2, h - 1, shine);
+	rp_hline(rp, x + 1, y + h - 1, w - 1, shadow);
+	rp_fill(rp, x + w - 2, y + 1, 2, h - 1, shadow);
+	rp_pixel(rp, x + w - 1, y, shadow);
+	rp_pixel(rp, x, y + h - 1, shine);
+}
+
+void rp_frame_ridge(struct rp *rp, int x, int y, int w, int h, int shine, int shadow)
+{
+	rp_frame_button(rp, x, y, w, h, shine, shadow);
+	rp_frame_button(rp, x + 2, y + 1, w - 4, h - 2, shadow, shine);
+}
+
 void rp_xor_rect(struct rp *rp, int x, int y, int w, int h, int mask)
 {
 	uint8_t *p;

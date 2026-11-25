@@ -1243,11 +1243,22 @@ static void req_layout(struct req *q, struct win *w, struct rect *buttons, struc
 	}
 	y = in.h - f->ysize - 10;
 	for (i = 0; i < q->nbuttons; i++) {
-		int x = q->nbuttons == 1 ? (in.w - bw) / 2 : i == 0 ? 6 : in.w - bw - 6;
+		int x = q->nbuttons == 1 ? (in.w - bw) / 2 : i == 0 ? 4 : in.w - bw - 4;
 
 		buttons[i] = rect_make(x, y, bw, f->ysize + 6);
 	}
-	*str = rect_make(8, y - f->ysize - 12, in.w - 16, f->ysize + 6);
+	/*
+	 * A string requester is laid out as Workbench's "Execute a File" is:
+	 * the prompt centred at the top, the last line as the string gadget's
+	 * label on its left, the buttons along the bottom.
+	 */
+	if (q->string) {
+		int lx = 8 + (q->nlines ? font_textlen(f, q->lines[q->nlines - 1], -1) + 8 : 0);
+
+		*str = rect_make(lx, y - f->ysize - 11, in.w - lx - 4, f->ysize + 6);
+	} else {
+		*str = rect_make(8, y - f->ysize - 12, in.w - 16, f->ysize + 6);
+	}
 }
 
 static void req_draw(struct win *w, struct rp *rp)
@@ -1261,23 +1272,34 @@ static void req_draw(struct win *w, struct rp *rp)
 	win_inner(w, &in);
 	rp_fill(rp, 0, 0, in.w, in.h, s->pens[P_BACKGROUND]);
 	req_layout(q, w, b, &str);
-	/* the text sits in a recessed box, as EasyRequest draws it */
-	rp_bevel(rp, 4, 3, in.w - 8, (q->string ? str.y : b[0].y) - 7, s->pens[P_SHADOW],
-		 s->pens[P_SHINE]);
-	if (q->image) {
-		const struct icon *ic = q->image;
+	if (q->string) {
+		/* flat grey; the prompt centred, the last line labels the gadget */
+		for (i = 0; i < q->nlines - 1; i++)
+			rp_text(rp, f, (in.w - font_textlen(f, q->lines[i], -1)) / 2,
+				y0 + i * (f->ysize + 1), q->lines[i], -1, s->pens[P_TEXT], -1);
+		if (q->nlines)
+			rp_text(rp, f, 8, str.y + 3, q->lines[q->nlines - 1], -1, s->pens[P_TEXT], -1);
+	} else {
+		/* EasyRequest: the window dithered white on grey, the text in a recessed box */
+		int bh = b[0].y - 7;
 
-		rp_blit(rp, 10, 8, &ic->img[0], 0, 0, ic->w, ic->h, ic->key);
-		x0 = 20 + ic->w;
+		rp_ghost(rp, 0, 0, in.w, in.h, s->pens[P_SHINE]);
+		rp_fill(rp, 4, 3, in.w - 8, bh, s->pens[P_BACKGROUND]);
+		rp_bevel(rp, 4, 3, in.w - 8, bh, s->pens[P_SHADOW], s->pens[P_SHINE]);
+		if (q->image) {
+			const struct icon *ic = q->image;
+
+			rp_blit(rp, 10, 8, &ic->img[0], 0, 0, ic->w, ic->h, ic->key);
+			x0 = 20 + ic->w;
+		}
+		for (i = 0; i < q->nlines; i++)
+			rp_text(rp, f, x0, y0 + 2 + i * (f->ysize + 1), q->lines[i], -1,
+				s->pens[P_TEXT], -1);
 	}
-	for (i = 0; i < q->nlines; i++)
-		rp_text(rp, f, x0, y0 + 2 + i * (f->ysize + 1), q->lines[i], -1, s->pens[P_TEXT], -1);
 	if (q->string) {
 		int tx = str.x + 4, cx;
 
-		rp_bevel(rp, str.x, str.y, str.w, str.h, s->pens[P_SHADOW], s->pens[P_SHINE]);
-		rp_bevel(rp, str.x + 1, str.y + 1, str.w - 2, str.h - 2, s->pens[P_SHINE],
-			 s->pens[P_SHADOW]);
+		rp_frame_ridge(rp, str.x, str.y, str.w, str.h, s->pens[P_SHINE], s->pens[P_SHADOW]);
 		rp_text(rp, f, tx, str.y + 3, q->text, -1, s->pens[P_TEXT], -1);
 		cx = tx + font_textlen(f, q->text, q->cursor);
 		rp_xor_rect(rp, cx, str.y + 3, f->xsize, f->ysize, s->xormask & 3 ? 3 : s->xormask);
@@ -1285,11 +1307,11 @@ static void req_draw(struct win *w, struct rp *rp)
 	for (i = 0; i < q->nbuttons; i++) {
 		int in_ = q->pressed == i;
 
-		if (in_)
-			rp_fill(rp, b[i].x, b[i].y, b[i].w, b[i].h, s->pens[P_FILL]);
-		rp_bevel(rp, b[i].x, b[i].y, b[i].w, b[i].h,
-			 in_ ? s->pens[P_SHADOW] : s->pens[P_SHINE],
-			 in_ ? s->pens[P_SHINE] : s->pens[P_SHADOW]);
+		rp_fill(rp, b[i].x, b[i].y, b[i].w, b[i].h,
+			in_ ? s->pens[P_FILL] : s->pens[P_BACKGROUND]);
+		rp_frame_button(rp, b[i].x, b[i].y, b[i].w, b[i].h,
+				in_ ? s->pens[P_SHADOW] : s->pens[P_SHINE],
+				in_ ? s->pens[P_SHINE] : s->pens[P_SHADOW]);
 		rp_text(rp, f, b[i].x + (b[i].w - font_textlen(f, q->buttons[i], -1)) / 2,
 			b[i].y + 3, q->buttons[i], -1, in_ ? s->pens[P_FILLTEXT] : s->pens[P_TEXT], -1);
 	}
@@ -1423,7 +1445,28 @@ static struct req *req_open(struct wb *wb, const char *title, const char *text,
 	while (p && *p && q->nlines < 24) {
 		const char *nl = strchr(p, '\n');
 		size_t n = nl ? (size_t)(nl - p) : strlen(p);
+		/* what fits on the screen: longer lines wrap, after a space or a / if
+		   there is one (paths), else where they run out of room */
+		int room = wb->s->w - 48 - (image ? image->w + 12 : 0);
 
+		while (n && font_textlen(f, p, (int)n) > room) {
+			size_t fit = n, brk = 0, k;
+
+			while (fit > 1 && font_textlen(f, p, (int)fit) > room)
+				fit--;
+			for (k = fit; k > fit / 2; k--)
+				if (p[k - 1] == ' ' || p[k - 1] == '/') {
+					brk = k;
+					break;
+				}
+			if (!brk)
+				brk = fit;
+			if (q->nlines >= 23)
+				break;
+			q->lines[q->nlines++] = strndup(p, brk);
+			p += brk;
+			n -= brk;
+		}
 		q->lines[q->nlines] = strndup(p, n);
 		i = font_textlen(f, q->lines[q->nlines], -1);
 		if (i > maxw)
@@ -1431,6 +1474,9 @@ static struct req *req_open(struct wb *wb, const char *title, const char *text,
 		q->nlines++;
 		p = nl ? nl + 1 : NULL;
 	}
+	for (i = 0; i < q->nlines; i++)
+		if (font_textlen(f, q->lines[i], -1) > maxw)
+			maxw = font_textlen(f, q->lines[i], -1);
 	snprintf(q->buttons[0], sizeof(q->buttons[0]), "%s", b1);
 	q->nbuttons = 1;
 	if (b2) {
@@ -1442,16 +1488,21 @@ static struct req *req_open(struct wb *wb, const char *title, const char *text,
 		if (image->h + 10 > q->nlines * (f->ysize + 1))
 			extra = image->h + 10 - q->nlines * (f->ysize + 1);
 	}
-	if (string && maxw < 320)
-		maxw = 320;
+	if (string && maxw < 350)
+		maxw = 350;
 	r.w = maxw + 40;
 	if (r.w < 200)
 		r.w = 200;
-	r.h = wm_title_height(wb->s) + 2 + 14 + q->nlines * (f->ysize + 1) + extra + f->ysize + 22 +
-	      (string ? f->ysize + 12 : 0);
-	r.x = (wb->s->w - r.w) / 2;
-	r.y = (wb->s->h - r.h) / 3;
-	w = win_open(wb->s, &r, WF_DRAG | WF_DEPTH | (string ? WF_CLOSE : 0), title, &req_ops, q);
+	if (string)	/* prompt lines, the gadget row (its label is the last line), buttons */
+		r.h = wm_title_height(wb->s) + 2 + 6 + (q->nlines - 1) * (f->ysize + 1) + 4 +
+		      2 * (f->ysize + 6) + 5 + 4 + 2;
+	else
+		r.h = wm_title_height(wb->s) + 2 + 14 + q->nlines * (f->ysize + 1) + extra +
+		      f->ysize + 22;
+	/* top left, under the screen's title bar, where 3.1 opens its requesters */
+	r.x = 0;
+	r.y = wb->s->barh - 1;
+	w = win_open(wb->s, &r, WF_DRAG | WF_DEPTH, title, &req_ops, q);
 	if (!w) {
 		for (i = 0; i < q->nlines; i++)
 			free(q->lines[i]);

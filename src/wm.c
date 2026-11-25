@@ -424,12 +424,14 @@ void screen_init(struct screen *s, struct bm *fb, int depth, struct font *font)
 void screen_draw_bar(struct screen *s)
 {
 	struct rp rp;
-	struct rect g = rect_make(s->w - DEPTH_W, 0, DEPTH_W, s->barh - 1);
+	/* the screen's depth gadget: a grey raised box down to the bar's bottom line */
+	struct rect g = rect_make(s->w - DEPTH_W, 0, DEPTH_W, s->barh);
 
 	rp_init(&rp, &s->root);
 	rp_fill(&rp, 0, 0, s->w, s->barh - 1, PEN(s, P_BARBLOCK));
 	rp_hline(&rp, 0, s->barh - 1, s->w, PEN(s, P_BARTRIM));
 	rp_text(&rp, s->font, 4, 1, s->title, -1, PEN(s, P_BARDETAIL), -1);
+	rp_fill(&rp, g.x, g.y, g.w, g.h, PEN(s, s->bar_depth_pressed ? P_FILL : P_BACKGROUND));
 	bevel_box(s, &rp, &g, s->bar_depth_pressed);
 	glyph_depth(s, &rp, &g, PEN(s, P_BARBLOCK));
 	g = rect_make(0, 0, s->w, s->barh);

@@ -58,6 +58,14 @@ void rp_box(struct rp *rp, int x, int y, int w, int h, int pen);
 /* raised (shine top/left, shadow bottom/right) or recessed bevel */
 void rp_bevel(struct rp *rp, int x, int y, int w, int h, int shine, int shadow);
 void rp_xor_rect(struct rp *rp, int x, int y, int w, int h, int mask);
+/*
+ * Intuition 3.x's frames (frameiclass) on a hires screen, where vertical
+ * lines are drawn two pixels wide to look as thick as horizontal ones:
+ * FRAME_BUTTON (raised, or recessed with shine and shadow swapped) and
+ * FRAME_RIDGE (a raised edge round a recessed one: string gadgets).
+ */
+void rp_frame_button(struct rp *rp, int x, int y, int w, int h, int shine, int shadow);
+void rp_frame_ridge(struct rp *rp, int x, int y, int w, int h, int shine, int shadow);
 /* key < 0: opaque */
 void rp_blit(struct rp *rp, int x, int y, const struct bm *src,
 	     int sx, int sy, int w, int h, int key);
