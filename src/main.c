@@ -4,7 +4,9 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -234,10 +236,95 @@ static void shot(const char *path)
 }
 
 /*
- * Scripts drive wbde without a mouse, for testing away from the machine:
- *   move X Y | down B | up B | click X Y | dclick X Y | menu X Y X2 Y2 |
+ * Commands drive wbde without a mouse: from a script file (--script, for
+ * testing away from the machine, with its own clock) or written to the
+ * control FIFO (/tmp/wbde-ctl or $WBDE_CTL, for poking the real thing remotely):
+ *   move X Y | down B | up B | click X Y | dclick X Y | menu X Y X2 Y2 [hold] |
  *   key CODE [QUAL] | type TEXT | wait MS | shot FILE | quit
+ * Coordinates are the logical screen's.
  */
+static void advance(uint64_t ms)
+{
+	if (scripted)
+		vclock += ms;
+	W.now = now_ms();
+}
+
+static void command(const char *line)
+{
+	int a, b, c, d;
+	char arg[400];
+
+	advance(20);
+	wb_tick(&W, W.now);
+	if (sscanf(line, "move %d %d", &a, &b) == 2) {
+		cb_motion(&S, a - S.mx, b - S.my);
+	} else if (sscanf(line, "down %d", &a) == 1) {
+		cb_button(&S, a, 1);
+	} else if (sscanf(line, "up %d", &a) == 1) {
+		cb_button(&S, a, 0);
+	} else if (sscanf(line, "click %d %d", &a, &b) == 2) {
+		cb_motion(&S, a - S.mx, b - S.my);
+		cb_button(&S, 1, 1);
+		cb_button(&S, 1, 0);
+	} else if (sscanf(line, "dclick %d %d", &a, &b) == 2) {
+		cb_motion(&S, a - S.mx, b - S.my);
+		cb_button(&S, 1, 1);
+		cb_button(&S, 1, 0);
+		advance(100);
+		cb_button(&S, 1, 1);
+		cb_button(&S, 1, 0);
+	} else if (sscanf(line, "menu %d %d %d %d", &a, &b, &c, &d) == 4) {
+		cb_motion(&S, a - S.mx, b - S.my);
+		cb_button(&S, 2, 1);
+		cb_motion(&S, c - S.mx, d - S.my);
+		if (!strstr(line, "hold"))
+			cb_button(&S, 2, 0);
+	} else if (sscanf(line, "key %d %d", &a, &b) >= 1) {
+		struct keyev k = { (uint16_t)a, 1, 0, 0 };
+
+		if (sscanf(line, "key %d %d", &a, &b) == 2)
+			k.qual = (unsigned int)b;
+		k.ch = input_keychar(a, k.qual);
+		cb_key(&S, &k);
+		k.down = 0;
+		cb_key(&S, &k);
+	} else if (sscanf(line, "type %399[^\n]", arg) == 1) {
+		char *p;
+
+		for (p = arg; *p; p++) {
+			struct keyev k = { 0, 1, (unsigned char)*p, 0 };
+
+			if (*p == '|')
+				k.code = 28;	/* Return */
+			cb_key(&S, &k);
+		}
+	} else if (sscanf(line, "wait %d", &a) == 1 && scripted) {
+		uint64_t until = vclock + (uint64_t)a;
+		struct pollfd fds[16];
+		int n;
+
+		while (vclock < until) {
+			n = con_pollfds(fds, 16);
+			poll(fds, (nfds_t)n, 10);
+			con_service(&S, fds, n);
+			flush();
+			if (got_chld) {
+				got_chld = 0;
+				con_reap(&S);
+			}
+			vclock += 10;
+			wm_tick(&S, vclock);
+		}
+	} else if (sscanf(line, "shot %399s", arg) == 1) {
+		shot(arg);
+		return;
+	} else if (!strncmp(line, "quit", 4)) {
+		W.quit = 1;
+	}
+	flush();
+}
+
 static int run_script(const char *path)
 {
 	char line[512];
@@ -247,83 +334,47 @@ static int run_script(const char *path)
 		perror(path);
 		return -1;
 	}
-	while (fgets(line, sizeof(line), f) && !W.quit) {
-		int a, b, c, d;
-		char arg[400];
-
-		vclock += 20;
-		W.now = vclock;
-		wb_tick(&W, vclock);
-		if (sscanf(line, "move %d %d", &a, &b) == 2) {
-			cb_motion(&S, a - S.mx, b - S.my);
-		} else if (sscanf(line, "down %d", &a) == 1) {
-			cb_button(&S, a, 1);
-		} else if (sscanf(line, "up %d", &a) == 1) {
-			cb_button(&S, a, 0);
-		} else if (sscanf(line, "click %d %d", &a, &b) == 2) {
-			cb_motion(&S, a - S.mx, b - S.my);
-			cb_button(&S, 1, 1);
-			cb_button(&S, 1, 0);
-		} else if (sscanf(line, "dclick %d %d", &a, &b) == 2) {
-			cb_motion(&S, a - S.mx, b - S.my);
-			cb_button(&S, 1, 1);
-			cb_button(&S, 1, 0);
-			vclock += 100;
-			W.now = vclock;
-			cb_button(&S, 1, 1);
-			cb_button(&S, 1, 0);
-		} else if (sscanf(line, "menu %d %d %d %d", &a, &b, &c, &d) == 4) {
-			cb_motion(&S, a - S.mx, b - S.my);
-			cb_button(&S, 2, 1);
-			cb_motion(&S, c - S.mx, d - S.my);
-			if (strstr(line, "hold")) {
-				flush();
-				continue;
-			}
-			cb_button(&S, 2, 0);
-		} else if (sscanf(line, "key %d %d", &a, &b) >= 1) {
-			struct keyev k = { (uint16_t)a, 1, 0, 0 };
-
-			if (sscanf(line, "key %d %d", &a, &b) == 2)
-				k.qual = (unsigned int)b;
-			k.ch = input_keychar(a, k.qual);
-			cb_key(&S, &k);
-			k.down = 0;
-			cb_key(&S, &k);
-		} else if (sscanf(line, "type %399[^\n]", arg) == 1) {
-			char *p;
-
-			for (p = arg; *p; p++) {
-				struct keyev k = { 0, 1, (unsigned char)*p, 0 };
-
-				cb_key(&S, &k);
-			}
-		} else if (sscanf(line, "wait %d", &a) == 1) {
-			uint64_t until = vclock + (uint64_t)a;
-			struct pollfd fds[16];
-			int n;
-
-			while (vclock < until) {
-				n = con_pollfds(fds, 16);
-				poll(fds, (nfds_t)n, 10);
-				con_service(&S, fds, n);
-				if (got_chld) {
-					got_chld = 0;
-					con_reap(&S);
-				}
-				vclock += 10;
-				wm_tick(&S, vclock);
-			}
-		} else if (sscanf(line, "shot %399s", arg) == 1) {
-			shot(arg);
-			continue;
-		} else if (!strncmp(line, "quit", 4)) {
-			break;
-		}
-		flush();
-	}
+	while (fgets(line, sizeof(line), f) && !W.quit)
+		command(line);
 	fclose(f);
 	return 0;
+}
+
+#define CTL_PATH "/tmp/wbde-ctl"
+static int ctl_fd = -1, ctl_keep = -1;
+static char ctl_buf[1024];
+static size_t ctl_len;
+
+static void ctl_open(void)
+{
+	const char *path = getenv("WBDE_CTL") ? getenv("WBDE_CTL") : CTL_PATH;
+
+	unlink(path);
+	if (mkfifo(path, 0600))
+		return;
+	ctl_fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+	/* a writer of our own, so the FIFO never reads as closed */
+	ctl_keep = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+}
+
+static void ctl_service(void)
+{
+	ssize_t n;
+	char *nl;
+
+	n = read(ctl_fd, ctl_buf + ctl_len, sizeof(ctl_buf) - 1 - ctl_len);
+	if (n <= 0)
+		return;
+	ctl_len += (size_t)n;
+	ctl_buf[ctl_len] = 0;
+	while ((nl = strchr(ctl_buf, '\n'))) {
+		*nl = 0;
+		command(ctl_buf);
+		ctl_len -= (size_t)(nl + 1 - ctl_buf);
+		memmove(ctl_buf, nl + 1, ctl_len + 1);
+	}
+	if (ctl_len == sizeof(ctl_buf) - 1)
+		ctl_len = 0;
 }
 
 static void usage(void)
@@ -423,6 +474,7 @@ int main(int argc, char **argv)
 
 	if (input_open())
 		fprintf(stderr, "wbde: no keyboard or mouse\n");
+	ctl_open();
 
 	while (!W.quit && !got_quit) {
 		struct pollfd fds[64];
@@ -431,16 +483,23 @@ int main(int argc, char **argv)
 
 		ni = input_pollfds(fds, 4);
 		nc = con_pollfds(fds + ni, 32);
+		if (ctl_fd >= 0) {
+			fds[ni + nc].fd = ctl_fd;
+			fds[ni + nc].events = POLLIN;
+			fds[ni + nc].revents = 0;
+		}
 		timeout = wm_busy(&S) ? 20 : 500;
 		if (input_poll_ms() > 0 && input_poll_ms() < timeout)
 			timeout = input_poll_ms();
-		if (poll(fds, (nfds_t)(ni + nc), timeout) < 0 && errno != EINTR)
+		if (poll(fds, (nfds_t)(ni + nc + (ctl_fd >= 0)), timeout) < 0 && errno != EINTR)
 			break;
 		now = now_ms();
 		W.now = now;
 		input_service(fds, ni, &CB);
 		input_tick(&CB);
 		con_service(&S, fds + ni, nc);
+		if (ctl_fd >= 0 && (fds[ni + nc].revents & POLLIN))
+			ctl_service();
 		if (got_chld) {
 			got_chld = 0;
 			con_reap(&S);
@@ -455,5 +514,7 @@ int main(int argc, char **argv)
 	}
 	input_close();
 	disp_close(&D);
+	if (ctl_fd >= 0)
+		unlink(CTL_PATH);
 	return 0;
 }

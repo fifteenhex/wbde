@@ -12,6 +12,7 @@ if grep " /mnt/sys " /proc/mounts | grep -q " rw,"; then
 	exit 1
 fi
 [ -f /tmp/wbde.pid ] && kill "$(cat /tmp/wbde.pid)" 2>/dev/null && sleep 1
+rm -f /tmp/wbde-ctl
 export HOME=${HOME:-/root}
 setsid "${WBDE_BIN:-$D/wbde}" "$@" > /tmp/wbde.log 2>&1 < /dev/null &
 echo $! > /tmp/wbde.pid
