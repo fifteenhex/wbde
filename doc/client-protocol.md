@@ -127,6 +127,24 @@ the colour, or the nearest.  A palette change reaches clients as a fresh
 - The window's UserPort: `WBP_EVENT`s turned into IntuiMessages.
 - `SetMenuStrip()`: `WBP_SET_MENUS`, with `FULLMENUNUM` as the id.
 
+## Programs started from Workbench
+
+A double click runs the program (through binfmt_misc, for an AmigaOS one)
+on a pseudo terminal whose output, if there is any, opens a console
+window.  Its environment says how it was started, so that amigafmt can
+build a `WBStartup` message instead of a CLI start:
+
+| variable | value |
+|---|---|
+| `WBDE_SOCKET` | the protocol socket (always) |
+| `WBDE_ICON` | the `.info` of the icon that was opened (tool or project) |
+| `WBDE_STACK` | the icon's `do_StackSize`, if it has one |
+
+For a project, argv is `{ default tool, project }`, with the default
+tool's `SYS:` path mapped onto the System partition's mount point.  The
+tool types are in the `.info`; the current directory is the icon's
+drawer.
+
 ## Not provided
 
 Screens other than Workbench's, busy pointer images, requesters drawn by

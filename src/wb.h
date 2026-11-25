@@ -79,5 +79,8 @@ void wb_update_title(struct wb *wb);
 void wb_request(struct wb *wb, const char *title, const char *text, const char *button);
 /* run something; output (if any) appears in a console window */
 int wb_launch(struct wb *wb, const char *dir, const char *const argv[], const char *title);
+/* the same, for an icon: its .info and stack go into the environment */
+int wb_launch_icon(struct wb *wb, const char *dir, const char *const argv[], const char *title,
+		   const char *info, int stack);
 
 #endif

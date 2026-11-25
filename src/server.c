@@ -652,6 +652,8 @@ int server_open(struct screen *s, const char *path, server_penfn pen, void *parg
 		return -errno;
 	}
 	chmod(sock_path, 0666);
+	/* everything started from Workbench knows where to find it */
+	setenv("WBDE_SOCKET", sock_path, 1);
 	fprintf(stderr, "wbde: clients on %s\n", sock_path);
 	return 0;
 }

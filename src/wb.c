@@ -763,21 +763,60 @@ static char *amiga_to_linux(struct wb *wb, const char *apath)
 	return NULL;
 }
 
-int wb_launch(struct wb *wb, const char *dir, const char *const argv[], const char *title)
+/*
+ * What a program started from an icon is told, in its environment (for
+ * amigafmt to build a WBStartup message from): WBDE_ICON is the .info of
+ * the icon that was opened, WBDE_STACK its stack size; argv[1] is the
+ * project, if it was one. WBDE_SOCKET is set by the server for everyone.
+ */
+int wb_launch_icon(struct wb *wb, const char *dir, const char *const argv[], const char *title,
+		   const char *info, int stack)
 {
 	struct rect r = rect_make(0, wb->s->barh, wb->s->w, wb->s->h / 3);
+	struct con *c;
+	char st[16];
 	int err = 0;
 
-	if (!con_spawn(wb->s, &r, title, dir, argv, 1, &err) || err) {
+	if (info)
+		setenv("WBDE_ICON", info, 1);
+	if (stack > 0) {
+		snprintf(st, sizeof(st), "%d", stack);
+		setenv("WBDE_STACK", st, 1);
+	}
+	c = con_spawn(wb->s, &r, title, dir, argv, 1, &err);
+	unsetenv("WBDE_ICON");
+	unsetenv("WBDE_STACK");
+	if (!c || err) {
 		char msg[300];
 
-		snprintf(msg, sizeof(msg), "Unable to open your tool\n'%s'\n%s", argv[0],
+		snprintf(msg, sizeof(msg), "Unable to open your tool\n'%s'\n%s", title,
 			 strerror(err ? err : EIO));
-		snprintf(wb->lastmsg, sizeof(wb->lastmsg), "Unable to open your tool '%s'", argv[0]);
+		snprintf(wb->lastmsg, sizeof(wb->lastmsg), "Unable to open your tool '%s'", title);
 		wb_request(wb, "Workbench Request", msg, "OK");
 		return -1;
 	}
 	return 0;
+}
+
+int wb_launch(struct wb *wb, const char *dir, const char *const argv[], const char *title)
+{
+	return wb_launch_icon(wb, dir, argv, title, NULL, 0);
+}
+
+/* the .info of an icon in a directory view, if it has one (malloc'd) */
+static char *icon_info_path(const struct wbicon *ic)
+{
+	char *dir = strdup(ic->path), *slash, *info = NULL;
+
+	if (!dir)
+		return NULL;
+	slash = strrchr(dir, '/');
+	if (slash) {
+		*slash = 0;
+		info = find_info(*dir ? dir : "/", slash + 1);
+	}
+	free(dir);
+	return info;
 }
 
 static void open_shell(struct wb *wb, const struct icon *ic)
@@ -876,8 +915,10 @@ static void open_icon(struct wb *wb, struct iconview *v, struct wbicon *ic)
 			wb_request(wb, "Workbench Request", msg, "OK");
 		} else {
 			const char *argv[] = { tool, ic->path, NULL };
+			char *info = icon_info_path(ic);
 
-			wb_launch(wb, dir, argv, ic->label);
+			wb_launch_icon(wb, dir, argv, ic->label, info, ic->ic.stack);
+			free(info);
 		}
 		free(tool);
 		free(dir);
@@ -890,8 +931,10 @@ static void open_icon(struct wb *wb, struct iconview *v, struct wbicon *ic)
 	}
 	if (ic->ic.type == WBTOOL || !access(ic->path, X_OK)) {
 		const char *argv[] = { ic->path, NULL };
+		char *info = icon_info_path(ic);
 
-		wb_launch(wb, dir, argv, ic->label);
+		wb_launch_icon(wb, dir, argv, ic->label, info, ic->ic.stack);
+		free(info);
 	} else {
 		char msg[300];
 
