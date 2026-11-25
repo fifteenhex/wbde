@@ -521,8 +521,9 @@ static void output(struct con *c, const char *buf, size_t n)
 struct con *con_spawn(struct screen *s, const struct rect *r, const char *title,
 		      const char *dir, const char *const argv[], int auto_open, int *err)
 {
+	static int shells;
 	struct con *c = calloc(1, sizeof(*c));
-	int errpipe[2], master, e = 0;
+	int errpipe[2], master, e = 0, shellno = 0;
 	char *slave;
 	ssize_t n;
 	pid_t pid;
@@ -543,6 +544,8 @@ struct con *con_spawn(struct screen *s, const struct rect *r, const char *title,
 		return NULL;
 	}
 
+	if (!argv)
+		shellno = ++shells;
 	master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
 	if (master < 0 || grantpt(master) || unlockpt(master) || !(slave = ptsname(master)) ||
 	    pipe2(errpipe, O_CLOEXEC)) {
@@ -580,6 +583,15 @@ struct con *con_spawn(struct screen *s, const struct rect *r, const char *title,
 		snprintf(cols, sizeof(cols), "%d", c->cols);
 		snprintf(rows, sizeof(rows), "%d", c->rows);
 		setenv("TERM", "vt102", 1);
+		if (!argv) {
+			/* AmigaShell's prompt is "%N.%S> ": the CLI number and the directory */
+			static int cli;
+			char ps1[32];
+
+			snprintf(ps1, sizeof(ps1), "%d.\\w> ", shellno);
+			setenv("PS1", ps1, 1);
+			(void)cli;
+		}
 		setenv("COLUMNS", cols, 1);
 		setenv("LINES", rows, 1);
 		signal(SIGCHLD, SIG_DFL);
@@ -589,7 +601,7 @@ struct con *con_spawn(struct screen *s, const struct rect *r, const char *title,
 		} else {
 			const char *sh = "/bin/sh";
 
-			execl(sh, "-sh", (char *)NULL);
+			execl(sh, "sh", (char *)NULL);	/* not a login shell: /etc/profile would set PS1 */
 		}
 		e = errno;
 		if (write(errpipe[1], &e, sizeof(e)) < 0)
