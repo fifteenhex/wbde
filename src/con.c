@@ -341,8 +341,13 @@ static int cur_pen(struct con *c)
 
 static void sgr(struct con *c, int *p, int n)
 {
-	/* ANSI colours onto Workbench pens: black, red, green, yellow, blue, magenta, cyan, white */
-	static const int map[8] = { 1, 4, 5, 7, 3, 4, 3, 2 };
+	/*
+	 * As the Amiga's console.device does it: ESC[3nm is pen n. So a Linux
+	 * "green" executable comes out white and a "blue" directory in pen 4;
+	 * readable on Workbench grey, which ANSI's own colours would not be.
+	 * 30 is pen 0 on the Amiga, invisible text; a Linux program means black.
+	 */
+	static const int map[8] = { 1, 1, 2, 3, 4, 5, 6, 7 };
 	int i;
 
 	if (!n) {
@@ -362,7 +367,7 @@ static void sgr(struct con *c, int *p, int n)
 		} else if (p[i] == 22) {
 			c->bold = 0;
 		} else if (p[i] >= 30 && p[i] <= 37) {
-			c->fg = map[p[i] - 30] < c->s->depth * 2 + 2 ? map[p[i] - 30] : 1;
+			c->fg = map[p[i] - 30] < (1 << c->s->depth) ? map[p[i] - 30] : 1;
 		} else if (p[i] == 39) {
 			c->fg = c->s->pens[P_TEXT];
 		}
