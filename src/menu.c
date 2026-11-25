@@ -4,6 +4,12 @@
  * boxes in BARBLOCKPEN edged with BARTRIMPEN, text in BARDETAILPEN, the
  * item under the pointer complemented, disabled items ghosted, shortcuts as
  * the Amiga key glyph and a letter on the right, submenus marked with ».
+ *
+ * As a real 3.1 screen shows it: the box's sides
+ * are two pixels wide and its top and bottom one, so they look as thick
+ * as each other on a hires screen; the highlight stops two pixels short of
+ * the sides; the text starts seven pixels in; the Amiga key is a black
+ * tab with a white slanted A, letter three pixels after it.
  */
 #include <ctype.h>
 #include <stdlib.h>
@@ -41,15 +47,31 @@ static unsigned int item_flags(const struct menuitem *it)
 	return f;
 }
 
+#define AKEY_W 23
+
+/*
+ * The Amiga key: a tab with its corners cut, eight rows high, and a white
+ * slanted A in it - the right leg upright, the left one a diagonal two
+ * pixels to the row, joined by a bar.  Drawn in fg with the A in bg.
+ */
 void menu_amigakey(struct screen *s, struct rp *rp, int x, int y, int fg, int bg)
 {
-	int h = s->font->ysize, w = 11;
-	struct rp t = *rp;
-	struct rect c = rect_make(x, y, w, h);
+	int r, h = s->font->ysize < 8 ? s->font->ysize : 8;
 
-	rp_fill(rp, x, y, w, h, fg);
-	rp_clip(&t, &c);
-	rp_text(&t, s->font, x + 2, y, "A", 1, bg, -1);
+	for (r = 0; r < h; r++) {
+		int cut = (r == 0 || r == h - 1) ? 2 : 0;
+
+		rp_hline(rp, x + cut, y + r, AKEY_W - 2 * cut, fg);
+	}
+	/* rows 1..6: the diagonal from the bottom left up to the right leg */
+	for (r = 1; r < h - 1; r++) {
+		int d = 14 - 2 * (r - 1);	/* where the diagonal's white starts */
+
+		rp_hline(rp, x + d, y + r, 3, bg);
+		rp_hline(rp, x + 15, y + r, 3, bg);	/* the right leg */
+		if (r == h - 3)				/* the bar */
+			rp_hline(rp, x + d, y + r, 18 - d, bg);
+	}
 }
 
 static void checkmark(struct rp *rp, int x, int y, int h, int pen)
@@ -73,9 +95,12 @@ static int needs_check(const struct menuitem *items, int n)
 	return 0;
 }
 
+#define TEXT_X 7		/* text from the box's left edge */
+#define CHECK_W 15		/* room for a check mark, when a box has one */
+
 static int box_width(struct screen *s, const struct menuitem *items, int n)
 {
-	int i, w = 0, check = needs_check(items, n) ? 14 : 0;
+	int i, w = 0, check = needs_check(items, n) ? CHECK_W : 0;
 
 	for (i = 0; i < n; i++) {
 		int iw;
@@ -85,13 +110,13 @@ static int box_width(struct screen *s, const struct menuitem *items, int n)
 		iw = font_textlen(s->font, items[i].label, -1) + check;
 
 		if (items[i].key)
-			iw += 11 + 4 + font_textlen(s->font, "M", 1) + 8;
+			iw += 12 + AKEY_W + 3 + font_textlen(s->font, "M", 1);
 		if (items[i].sub)
 			iw += 16;
 		if (iw > w)
 			w = iw;
 	}
-	return w + 10;
+	return TEXT_X + w + 7;
 }
 
 static int item_height(const struct menuitem *it)
@@ -101,7 +126,7 @@ static int item_height(const struct menuitem *it)
 
 static int box_height(const struct menuitem *items, int n)
 {
-	int i, h = 4;
+	int i, h = 3;	/* items from row 1, a blank row and the edge after them */
 
 	for (i = 0; i < n; i++)
 		h += item_height(&items[i]);
@@ -112,43 +137,47 @@ static void draw_box(struct screen *s, struct bm *bm, const struct menuitem *ite
 		     int hl)
 {
 	int fg = s->pens[P_BARDETAIL], bg = s->pens[P_BARBLOCK];
-	int check = needs_check(items, n) ? 14 : 0;
+	int check = needs_check(items, n) ? CHECK_W : 0;
+	int trim = s->pens[P_BARTRIM];
 	struct rp rp;
-	int i, y = 2;
+	int i, y = 1;
 
 	rp_init(&rp, bm);
 	rp_fill(&rp, 0, 0, bm->w, bm->h, bg);
-	rp_box(&rp, 0, 0, bm->w, bm->h, s->pens[P_BARTRIM]);
+	/* two pixels at the sides, one at the top and bottom */
+	rp_box(&rp, 0, 0, bm->w, bm->h, trim);
+	rp_vline(&rp, 1, 0, bm->h, trim);
+	rp_vline(&rp, bm->w - 2, 0, bm->h, trim);
 	for (i = 0; i < n; i++) {
 		const struct menuitem *it = &items[i];
 		unsigned int f = item_flags(it);
 		int h = item_height(it), ifg = fg, ibg = bg;
 
 		if (f & MI_BAR) {
-			rp_ghost(&rp, 2, y + 2, bm->w - 4, 2, fg);
+			rp_ghost(&rp, 4, y + 2, bm->w - 8, 2, fg);
 			y += h;
 			continue;
 		}
 		if (i == hl && !(f & MI_DISABLED)) {
-			rp_fill(&rp, 2, y, bm->w - 4, h, fg);
+			rp_fill(&rp, 4, y, bm->w - 8, h, fg);
 			ifg = bg;
 			ibg = fg;
 		}
 		if ((f & MI_CHECKIT) && (f & MI_CHECKED))
-			checkmark(&rp, 4, y, h, ifg);
-		rp_text(&rp, s->font, 4 + check, y + 1, it->label, -1, ifg, -1);
+			checkmark(&rp, TEXT_X - 1, y, h, ifg);
+		rp_text(&rp, s->font, TEXT_X + check, y + 1, it->label, -1, ifg, -1);
 		if (it->key) {
 			char k[2] = { (char)toupper((unsigned char)it->key), 0 };
 			int kw = font_textlen(s->font, k, 1);
 
-			rp_text(&rp, s->font, bm->w - 6 - kw, y + 1, k, 1, ifg, -1);
-			menu_amigakey(s, &rp, bm->w - 6 - kw - 4 - 11, y + 1, ifg, ibg);
+			rp_text(&rp, s->font, bm->w - 7 - kw, y + 1, k, 1, ifg, -1);
+			menu_amigakey(s, &rp, bm->w - 7 - kw - 3 - AKEY_W, y + 1, ifg, ibg);
 		}
 		if (it->sub)
-			rp_text(&rp, s->font, bm->w - 6 - font_textlen(s->font, "\xbb", 1),
+			rp_text(&rp, s->font, bm->w - 7 - font_textlen(s->font, "\xbb", 1),
 				y + 1, "\xbb", 1, ifg, -1);
 		if (f & MI_DISABLED)
-			rp_ghost(&rp, 2, y, bm->w - 4, h, ibg);
+			rp_ghost(&rp, 4, y, bm->w - 8, h, ibg);
 		y += h;
 	}
 }
@@ -244,7 +273,7 @@ static void open_sub(struct screen *s, int item, int itemy)
 
 int menu_open(struct screen *s, const struct menustrip *strip)
 {
-	int i, x = 0;
+	int i, x = 3;	/* the first title three pixels in, as on 3.1 */
 
 	if (!strip || !strip->n || M.open)
 		return 0;
@@ -252,7 +281,7 @@ int menu_open(struct screen *s, const struct menustrip *strip)
 	M.s = s;
 	M.strip = strip;
 	M.menu = M.item = M.sub = -1;
-	M.itemh = s->font->ysize + 2;
+	M.itemh = s->font->ysize + 1;	/* nine rows a topaz item, as 3.1 has them */
 	for (i = 0; i < strip->n && i < MAXMENUS; i++) {
 		M.titlex[i] = x;
 		M.titlew[i] = font_textlen(s->font, strip->menus[i].title, -1) + 8;
@@ -272,7 +301,7 @@ int menu_open(struct screen *s, const struct menustrip *strip)
 /* which item of a box is at y (box coordinates); -1 none */
 static int item_at(const struct menuitem *items, int n, int y, int *itemy)
 {
-	int i, at = 2;
+	int i, at = 1;
 
 	for (i = 0; i < n; i++) {
 		int h = item_height(&items[i]);

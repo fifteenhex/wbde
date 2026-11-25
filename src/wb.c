@@ -174,23 +174,35 @@ static void icon_label(struct wb *wb, struct wbicon *ic, const char *label)
 	ic->labelw = font_textlen(wb->env->iconfont, label, -1);
 }
 
+/*
+ * Workbench 3.1 draws every icon in a raised frame, recessed while it is
+ * selected: the image with three pixels of room either side and two above
+ * and below, inside a one pixel bevel (so the frame is the image grown by
+ * ICON_FX and ICON_FY), and the label two pixels under the frame.
+ * ic->x, ic->y stay the image's top left.
+ */
+#define ICON_FX	4
+#define ICON_FY	3
+
 static int icon_w(const struct wbicon *ic)
 {
-	return ic->ic.w > ic->labelw ? ic->ic.w : ic->labelw;
+	int fw = ic->ic.w + 2 * ICON_FX;
+
+	return fw > ic->labelw ? fw : ic->labelw;
 }
 
 static int icon_h(struct wb *wb, const struct wbicon *ic)
 {
-	return ic->ic.h + 1 + wb->env->iconfont->ysize;
+	return ic->ic.h + 2 * ICON_FY + 1 + wb->env->iconfont->ysize;
 }
 
-/* the area the icon covers, view coordinates */
+/* the area the icon covers, frame and label, view coordinates */
 static struct rect icon_bounds(struct wb *wb, const struct wbicon *ic)
 {
 	int w = icon_w(ic);
 	int cx = ic->x + ic->ic.w / 2;
 
-	return rect_make(cx - w / 2, ic->y, w, icon_h(wb, ic));
+	return rect_make(cx - w / 2, ic->y - ICON_FY, w, icon_h(wb, ic));
 }
 
 /* --- drawing --- */
@@ -201,6 +213,15 @@ static void draw_icon(struct wb *wb, struct rp *rp, const struct wbicon *ic, int
 	int sel = ic->selected || ic->open;
 	int x = ic->x - ox, y = ic->y - oy;
 
+	/* the frame: filled with the background pen, raised, recessed when selected */
+	rp_fill(rp, x - ICON_FX, y - ICON_FY, i->w + 2 * ICON_FX, i->h + 2 * ICON_FY,
+		PEN(wb, P_BACKGROUND));
+	if (sel)
+		rp_bevel(rp, x - ICON_FX, y - ICON_FY, i->w + 2 * ICON_FX, i->h + 2 * ICON_FY,
+			 PEN(wb, P_SHADOW), PEN(wb, P_SHINE));
+	else
+		rp_bevel(rp, x - ICON_FX, y - ICON_FY, i->w + 2 * ICON_FX, i->h + 2 * ICON_FY,
+			 PEN(wb, P_SHINE), PEN(wb, P_SHADOW));
 	if (sel && i->img[1].px) {
 		rp_blit(rp, x, y, &i->img[1], 0, 0, i->w, i->h, i->key);
 	} else {
@@ -208,8 +229,9 @@ static void draw_icon(struct wb *wb, struct rp *rp, const struct wbicon *ic, int
 		if (sel)	/* GADGHCOMP: complement the image's planes */
 			rp_xor_rect(rp, x, y, i->w, i->h, i->glow ? wb->s->xormask : 3);
 	}
-	rp_text(rp, wb->env->iconfont, x + i->w / 2 - ic->labelw / 2, y + i->h + 1,
-		ic->label, -1, PEN(wb, P_TEXT), -1);
+	/* the label on the background pen (JAM2), readable over a pattern */
+	rp_text(rp, wb->env->iconfont, x + i->w / 2 - ic->labelw / 2, y + i->h + ICON_FY + 2,
+		ic->label, -1, PEN(wb, P_TEXT), PEN(wb, P_BACKGROUND));
 }
 
 static void draw_view(struct wb *wb, struct rp *rp, struct iconview *v, int ox, int oy,
@@ -332,7 +354,7 @@ static void layout(struct wb *wb, struct iconview *v, int width, int force)
 			rowh = 0;
 		}
 		ic->x = x + w / 2 - ic->ic.w / 2;
-		ic->y = y;
+		ic->y = y + ICON_FY;
 		x += w + 10;
 		if (h > rowh)
 			rowh = h;
@@ -674,9 +696,49 @@ static void busy(struct wb *wb, int on)
 		wb->s->flush_now();
 }
 
+/* 1234567 -> "1,234,567" */
+static void thousands(char *out, size_t n, unsigned long long v)
+{
+	char tmp[32];
+	int len, i, o = 0;
+
+	len = snprintf(tmp, sizeof(tmp), "%llu", v);
+	for (i = 0; i < len && o + 2 < (int)n; i++) {
+		if (i && (len - i) % 3 == 0)
+			out[o++] = ',';
+		out[o++] = tmp[i];
+	}
+	out[o] = 0;
+}
+
+/*
+ * A disk's window says how full the disk is, as 3.1's Workbench does:
+ * "Workbench  10% full, 7,334K free, 858K in use".
+ */
+static void volume_title(char *out, size_t n, const char *name, const char *path)
+{
+	struct statvfs v;
+	unsigned long long total, avail, used;
+	char f[32], u[32];
+
+	/* a read-only AFFS mount counts no free blocks at all: say nothing then */
+	if (statvfs(path, &v) || !v.f_blocks || ((v.f_flag & ST_RDONLY) && !v.f_bfree)) {
+		snprintf(out, n, "%s", name);
+		return;
+	}
+	total = (unsigned long long)v.f_blocks * v.f_frsize / 1024;
+	avail = (unsigned long long)v.f_bavail * v.f_frsize / 1024;
+	used = total - (unsigned long long)v.f_bfree * v.f_frsize / 1024;
+	thousands(f, sizeof(f), avail);
+	thousands(u, sizeof(u), used);
+	snprintf(out, n, "%s  %d%% full, %sK free, %sK in use", name,
+		 total ? (int)((used * 100 + total / 2) / total) : 0, f, u);
+}
+
 static struct drawer *open_drawer(struct wb *wb, const char *path, const char *title,
 				  const struct icon *geom, struct iconview *from)
 {
+	char vtitle[160];
 	struct drawer *d = find_drawer_path(wb, path);
 	struct rect r;
 
@@ -704,6 +766,10 @@ static struct drawer *open_drawer(struct wb *wb, const char *path, const char *t
 
 		r = rect_make(40 + cascade * 16, wb->s->barh + 20 + cascade * 12, 400, 160);
 		cascade = (cascade + 1) % 8;
+	}
+	if (geom && geom->type == WBDISK) {
+		volume_title(vtitle, sizeof(vtitle), title, path);
+		title = vtitle;
 	}
 	d->win = win_open(wb->s, &r, WF_STD | WF_VSCROLL | WF_HSCROLL, title, &drawer_ops, d);
 	if (!d->win) {
@@ -1786,7 +1852,7 @@ static void add_left_out(struct wb *wb, const struct rect *in)
 
 				/* in a column right of the disks, label and all */
 				ic->x = 0;
-				ic->y = auto_y;
+				ic->y = auto_y + ICON_FY;
 				b = icon_bounds(wb, ic);
 				ic->x = wb->leftout_x - b.x;
 				do {
@@ -1796,12 +1862,12 @@ static void add_left_out(struct wb *wb, const struct rect *in)
 						struct rect o = icon_bounds(wb, &wb->root.icons[i]), x;
 
 						if (rect_intersect(&x, &b, &o)) {
-							ic->y = o.y + o.h + 6;
+							ic->y = o.y + o.h + 6 + ICON_FY;
 							clash = 1;
 						}
 					}
 				} while (clash && ic->y < in->h);
-				auto_y = ic->y + icon_h(wb, ic) + 8;
+				auto_y = ic->y - ICON_FY + icon_h(wb, ic) + 8;
 			}
 		}
 		fclose(f);
@@ -1848,8 +1914,8 @@ static void build_root(struct wb *wb)
 				continue;
 			ic = &wb->root.icons[i];
 			ic->x = x0 + colw / 2 - ic->ic.w / 2;
-			ic->y = y;
-			y += icon_h(wb, ic) + 8;
+			ic->y = y + ICON_FY;
+			y += icon_h(wb, ic) + 6;
 			if (y > in.h - 40) {
 				y = 6;
 				x0 += colw + 12;

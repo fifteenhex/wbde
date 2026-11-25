@@ -6,6 +6,12 @@
  * a scroller in them. Active windows are filled with FILLPEN (blue), the
  * rest with BACKGROUNDPEN. Intuition 3.x draws the gadget glyphs with code
  * (sysiclass), not from bitmaps, so they are drawn with code here too.
+ *
+ * The shapes follow what a real Kickstart 3.1 Workbench shows (compared
+ * side by side with one booted in an emulator):
+ * every gadget is a raised box, the arrows are open chevrons, a
+ * scroller's knob is a raised box in the border's own colour, the depth
+ * gadget is a grey window behind a white one.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +28,7 @@ enum {
 
 enum { M_NONE, M_GADGET, M_DRAG, M_SIZE, M_VKNOB, M_HKNOB, M_CONTENT, M_BARDEPTH };
 
-#define CLOSE_W	20
+#define CLOSE_W	19
 #define DEPTH_W	23
 #define ZOOM_W	23
 #define SIZE_W	18
@@ -161,68 +167,101 @@ static void bevel_box(struct screen *s, struct rp *rp, const struct rect *r, int
 		rp_bevel(rp, r->x, r->y, r->w, r->h, PEN(s, P_SHINE), PEN(s, P_SHADOW));
 }
 
+/* the close gadget: a small white square edged in black */
 static void glyph_close(struct screen *s, struct rp *rp, const struct rect *r)
 {
-	int bw = 6, bh = r->h - 6;
-	int x = r->x + (r->w - bw) / 2, y = r->y + (r->h - bh) / 2;
+	int x = r->x + 7, y = r->y + (r->h - 5) / 2;
 
-	rp_fill(rp, x, y, bw, bh, PEN(s, P_SHINE));
-	rp_box(rp, x, y, bw, bh, PEN(s, P_SHADOW));
+	rp_fill(rp, x, y, 5, 5, PEN(s, P_SHINE));
+	rp_box(rp, x, y, 5, 5, PEN(s, P_SHADOW));
 }
 
+/* the depth gadget: a grey window behind a white one, both edged in black */
 static void glyph_depth(struct screen *s, struct rp *rp, const struct rect *r, int fill)
 {
-	int bw = 10, bh = r->h - 5;
-	int x = r->x + 5, y = r->y + 2;
+	int x = r->x + 4, y = r->y + 2, h = r->h - 6;
 
-	rp_fill(rp, x, y, bw, bh - 2, fill);
-	rp_box(rp, x, y, bw, bh - 2, PEN(s, P_SHADOW));
-	rp_fill(rp, x + 4, y + 2, bw, bh - 2, PEN(s, P_SHINE));
-	rp_box(rp, x + 4, y + 2, bw, bh - 2, PEN(s, P_SHADOW));
+	(void)fill;
+	rp_fill(rp, x, y, 11, h, PEN(s, P_BACKGROUND));
+	rp_box(rp, x, y, 11, h, PEN(s, P_SHADOW));
+	rp_fill(rp, x + 4, y + 2, 11, h, PEN(s, P_SHINE));
+	rp_box(rp, x + 4, y + 2, 11, h, PEN(s, P_SHADOW));
 }
 
+/* the zoom gadget: a window outline with a small white one in its corner */
 static void glyph_zoom(struct screen *s, struct rp *rp, const struct rect *r, int fill)
 {
-	int x = r->x + 5, y = r->y + 2, bw = r->w - 10, bh = r->h - 4;
+	int x = r->x + 5, y = r->y + 2, h = r->h - 4;
 
-	rp_fill(rp, x, y, bw, bh, fill);
-	rp_box(rp, x, y, bw, bh, PEN(s, P_SHADOW));
-	rp_fill(rp, x + 1, y + 1, bw / 2 - 1, bh / 2, PEN(s, P_SHINE));
-	rp_box(rp, x, y, bw / 2 + 1, bh / 2 + 1, PEN(s, P_SHADOW));
+	rp_fill(rp, x, y, 13, h, fill);
+	rp_box(rp, x, y, 13, h, PEN(s, P_SHADOW));
+	rp_fill(rp, x, y, 7, h / 2 + 1, PEN(s, P_SHADOW));
+	rp_fill(rp, x + 2, y + 1, 3, h / 2 - 1, PEN(s, P_SHINE));
 }
 
+/* the size gadget: a white wedge rising to the right, edged in black */
 static void glyph_size(struct screen *s, struct rp *rp, const struct rect *r)
 {
-	int x0 = r->x + 4, y0 = r->y + 2;
-	int w = r->w - 8, h = r->h - 4, row;
+	int x0 = r->x + 3, y0 = r->y + 2, row;
 
-	/* a white right-angled triangle, its slope edged in shadow */
-	for (row = 0; row < h; row++) {
-		int from = x0 + w - 1 - (row * (w - 1)) / (h - 1);
+	for (row = 0; row < 5; row++) {
+		int from = x0 + 8 - 2 * row;	/* two pixels further left a row */
 
-		rp_hline(rp, from, y0 + row, x0 + w - from, PEN(s, P_SHINE));
-		rp_pixel(rp, from, y0 + row, PEN(s, P_SHADOW));
+		rp_fill(rp, from, y0 + row, 2, 1, PEN(s, P_SHADOW));
+		rp_fill(rp, from + 2, y0 + row, x0 + 10 - (from + 2), 1, PEN(s, P_SHINE));
 	}
-	rp_hline(rp, x0, y0 + h - 1, w, PEN(s, P_SHADOW));
-	rp_vline(rp, x0 + w - 1, y0, h, PEN(s, P_SHADOW));
+	rp_hline(rp, x0, y0 + 5, 11, PEN(s, P_SHADOW));
+	rp_vline(rp, x0 + 10, y0, 6, PEN(s, P_SHADOW));
 }
 
-/* dir 0 up, 1 down, 2 left, 3 right: a solid triangle in shadow */
+/*
+ * The scroller arrows: open chevrons, two pixels thick, five rows; dir 0
+ * up, 1 down, 2 left, 3 right.  Rows of an up chevron, from its point.
+ */
 static void glyph_arrow(struct screen *s, struct rp *rp, const struct rect *r, int dir)
 {
-	int cx = r->x + r->w / 2, cy = r->y + r->h / 2, i;
-	int pen = PEN(s, P_SHADOW);
+	static const struct { signed char a, b; } up[5][2] = {
+		{ { 4, 2 }, { 0, 0 } },		/* x offset, width: the point */
+		{ { 3, 4 }, { 0, 0 } },
+		{ { 2, 6 }, { 0, 0 } },
+		{ { 1, 3 }, { 6, 3 } },		/* the two legs */
+		{ { 0, 2 }, { 8, 2 } },
+	};
+	static const struct { signed char a, b; } left[5][2] = {
+		{ { 4, 2 }, { 0, 0 } },
+		{ { 2, 3 }, { 0, 0 } },
+		{ { 0, 4 }, { 0, 0 } },
+		{ { 2, 3 }, { 0, 0 } },
+		{ { 4, 2 }, { 0, 0 } },
+	};
+	int pen = PEN(s, P_SHADOW), i, k;
 
-	for (i = 0; i < 4; i++) {
-		switch (dir) {
-		case 0: rp_hline(rp, cx - i, cy - 2 + i, 2 * i + 1, pen); break;
-		case 1: rp_hline(rp, cx - i, cy + 1 - i, 2 * i + 1, pen); break;
-		case 2: rp_vline(rp, cx - 2 + i, cy - i, 2 * i + 1, pen); break;
-		case 3: rp_vline(rp, cx + 1 - i, cy - i, 2 * i + 1, pen); break;
+	for (i = 0; i < 5; i++) {
+		for (k = 0; k < 2; k++) {
+			int a, b;
+
+			if (dir < 2) {
+				int row = dir == 0 ? i : 4 - i;
+
+				a = up[row][k].a;
+				b = up[row][k].b;
+				if (b)
+					rp_hline(rp, r->x + (r->w - 10) / 2 + a, r->y + (r->h - 5) / 2 + i,
+						 b, pen);
+			} else {
+				a = left[i][k].a;
+				b = left[i][k].b;
+				if (!b)
+					continue;
+				if (dir == 3)		/* mirrored */
+					a = 6 - a - b;
+				rp_hline(rp, r->x + (r->w - 6) / 2 + a, r->y + (r->h - 5) / 2 + i, b, pen);
+			}
 		}
 	}
 }
 
+/* a scroller: no container of its own, the knob a raised box in the border's colour */
 static void draw_prop(struct screen *s, struct rp *rp, const struct rect *c,
 		      int vertical, int total, int vis, int top, int fill)
 {
@@ -239,7 +278,6 @@ static void draw_prop(struct screen *s, struct rp *rp, const struct rect *c,
 		knob(c->w, total, vis, top, &pos, &len);
 		k = rect_make(c->x + pos, c->y, len, c->h);
 	}
-	rp_fill(rp, k.x, k.y, k.w, k.h, PEN(s, P_BACKGROUND));
 	bevel_box(s, rp, &k, 0);
 }
 
@@ -265,14 +303,22 @@ static void draw_frame(struct screen *s, struct win *w)
 		 PEN(s, P_SHADOW), PEN(s, P_SHINE));
 
 	if (gadget_rect(s, w, G_DRAG, &g) || !(w->flags & WF_BORDERLESS)) {
-		int x0 = (w->flags & WF_CLOSE) ? CLOSE_W + 4 : 4;
+		/* the drag bar is a raised box too; the title sits 11 pixels into it */
+		int x0 = (w->flags & WF_CLOSE) ? CLOSE_W + 11 : 4;
 		int x1 = W - ((w->flags & WF_DEPTH) ? DEPTH_W : 0) -
 			 ((w->flags & WF_ZOOM) ? ZOOM_W : 0) - 2;
 		struct rp t = rp;
 		struct rect clip = rect_make(x0, 0, x1 - x0, w->bt);
 
+		if (w->flags & WF_DRAG) {
+			struct rect d;
+
+			gadget_rect(s, w, G_DRAG, &d);
+			if (w->flags & WF_CLOSE)
+				bevel_box(s, &rp, &d, 0);
+		}
 		rp_clip(&t, &clip);
-		rp_text(&t, s->font, x0, 2, w->title, -1,
+		rp_text(&t, s->font, x0, 1, w->title, -1,
 			active ? PEN(s, P_FILLTEXT) : PEN(s, P_TEXT), -1);
 	}
 	if (gadget_rect(s, w, G_CLOSE, &g)) {
