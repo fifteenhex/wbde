@@ -498,3 +498,38 @@ int env_load(struct wbenv *env, const char *sysdir)
 	}
 	return 0;
 }
+
+/* an IFF ILBM as a backdrop tile, its colours mapped onto pens */
+int env_load_pattern(struct wbenv *env, int which, const char *path)
+{
+	struct ilbm ilbm;
+	uint8_t map[256], *buf;
+	size_t len;
+	int i, x, y, ret;
+
+	if (which < 0 || which > 2)
+		return -EINVAL;
+	buf = file_slurp(path, &len, 4 << 20);
+	if (!buf)
+		return -errno;
+	ret = ilbm_decode(buf, len, &ilbm);
+	free(buf);
+	if (ret)
+		return ret;
+	for (i = 0; i < 256; i++)
+		map[i] = i < ilbm.ncolours ?
+			 (uint8_t)env_pen(env, ilbm.cmap[i][0], ilbm.cmap[i][1], ilbm.cmap[i][2]) : 0;
+	for (y = 0; y < ilbm.bm.h; y++)
+		for (x = 0; x < ilbm.bm.w; x++) {
+			uint8_t *p = &ilbm.bm.px[y * ilbm.bm.stride + x];
+
+			*p = map[*p];
+		}
+	if (ilbm.mask.px)
+		bm_free(&ilbm.mask);
+	if (env->pattern[which].px)
+		bm_free(&env->pattern[which]);
+	env->pattern[which] = ilbm.bm;
+	env_logf(env, "backdrop: %s, %dx%d, %d colours", path, ilbm.bm.w, ilbm.bm.h, ilbm.ncolours);
+	return 0;
+}

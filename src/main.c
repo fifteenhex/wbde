@@ -245,7 +245,7 @@ static void usage(void)
 {
 	fprintf(stderr,
 		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--conf FILE] [--rom FILE]\n"
-		"            [--script FILE]\n");
+		"            [--script FILE] [--pattern ILBM] [--drawer-pattern ILBM]\n");
 }
 
 int main(int argc, char **argv)
@@ -257,14 +257,17 @@ int main(int argc, char **argv)
 		{ "conf", required_argument, NULL, 'c' },
 		{ "rom", required_argument, NULL, 'r' },
 		{ "script", required_argument, NULL, 'S' },
+		{ "pattern", required_argument, NULL, 'p' },
+		{ "drawer-pattern", required_argument, NULL, 'P' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
 	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *conf = NULL, *script = NULL;
+	const char *pattern = NULL, *dpattern = NULL;
 	struct sigaction sa;
 	int o;
 
-	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:h", opts, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:p:P:h", opts, NULL)) != -1) {
 		switch (o) {
 		case 'm': mode = optarg; break;
 		case 'z': size = optarg; break;
@@ -272,6 +275,8 @@ int main(int argc, char **argv)
 		case 'c': conf = optarg; break;
 		case 'r': setenv("WBDE_ROM", optarg, 1); break;
 		case 'S': script = optarg; break;
+		case 'p': pattern = optarg; break;
+		case 'P': dpattern = optarg; break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -283,6 +288,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "wbde: no topaz: the Kickstart ROM could not be read\n");
 		return 1;
 	}
+	if (pattern && env_load_pattern(&ENV, 0, pattern))
+		env_logf(&ENV, "backdrop: cannot load %s", pattern);
+	if (dpattern && env_load_pattern(&ENV, 1, dpattern))
+		env_logf(&ENV, "drawer pattern: cannot load %s", dpattern);
 	if (disp_open(&D, mode, size))
 		return 1;
 	env_logf(&ENV, "display: %s", D.desc);

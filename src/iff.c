@@ -114,8 +114,16 @@ int ilbm_decode(const uint8_t *buf, size_t len, struct ilbm *out)
 	out->transparent = -1;
 	bmhd = iff_chunk(buf, len, IFF_ID('I', 'L', 'B', 'M'), IFF_ID('B', 'M', 'H', 'D'), &bmhdlen);
 	body = iff_chunk(buf, len, IFF_ID('I', 'L', 'B', 'M'), IFF_ID('B', 'O', 'D', 'Y'), &bodylen);
-	if (!bmhd || bmhdlen < 20 || !body)
+	if (!bmhd || bmhdlen < 20 || !body) {
+		size_t at;
+
+		/* some tools wrap the picture: an outer FORM with an ANNO, then a FORM ILBM */
+		for (at = 12; at + 12 <= len; at += 2)
+			if (be32(buf + at) == IFF_ID('F', 'O', 'R', 'M') &&
+			    be32(buf + at + 8) == IFF_ID('I', 'L', 'B', 'M'))
+				return ilbm_decode(buf + at, len - at, out);
 		return -EINVAL;
+	}
 	w = be16(bmhd);
 	h = be16(bmhd + 2);
 	depth = bmhd[8];

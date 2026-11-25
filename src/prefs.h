@@ -44,6 +44,8 @@ int env_load(struct wbenv *env, const char *sysdir);
 int env_pen(void *env, uint8_t r, uint8_t g, uint8_t b);
 /* a copy of the default icon for a type, falling back sensibly */
 int env_default_icon(struct wbenv *env, int type, struct icon *out);
+/* an IFF ILBM tiled behind the disks (0) or in drawers (1) */
+int env_load_pattern(struct wbenv *env, int which, const char *path);
 void env_logf(struct wbenv *env, const char *fmt, ...);
 
 #endif
