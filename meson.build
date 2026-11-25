@@ -44,13 +44,13 @@ foreach name : need
   smol += {name: dir}
 endforeach
 
-inc = include_directories('src')
+inc = include_directories('src', 'include')
 smol_inc = [include_directories(smol['smolinput'], is_system: true)]
 
 readers = files('src/rom.c', 'src/font.c', 'src/gfx.c', 'src/iff.c', 'src/icon.c',
                 'src/hunk.c')
 core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/wb.c',
-                       'src/input.c', 'src/con.c', 'src/main.c')
+                       'src/input.c', 'src/server.c', 'src/con.c', 'src/main.c')
 
 # One display, picked at build time: smol2d on DRM, or memory only
 if get_option('soft')
@@ -69,6 +69,9 @@ executable('wbde', core + disp,
   install: true)
 
 executable('wbrom', 'tools/wbrom.c', readers, include_directories: inc)
+executable('wbclient-demo', 'tools/wbclient-demo.c', include_directories: inc)
+
+install_headers('include/wbde_proto.h', 'include/wbclient.h', subdir: 'wbde')
 
 install_data('scripts/wbde.sh', install_dir: get_option('bindir'),
              install_mode: 'rwxr-xr-x')

@@ -22,6 +22,7 @@
 #include "input.h"
 #include "menu.h"
 #include "prefs.h"
+#include "server.h"
 #include "wb.h"
 #include "wm.h"
 
@@ -305,9 +306,13 @@ static void command(const char *line)
 		int n;
 
 		while (vclock < until) {
-			n = con_pollfds(fds, 16);
+			int nc;
+
+			nc = con_pollfds(fds, 8);
+			n = nc + server_pollfds(fds + nc, 8);
 			poll(fds, (nfds_t)n, 10);
-			con_service(&S, fds, n);
+			con_service(&S, fds, nc);
+			server_service(&S, fds + nc, n - nc);
 			flush();
 			if (got_chld) {
 				got_chld = 0;
@@ -381,7 +386,7 @@ static void usage(void)
 {
 	fprintf(stderr,
 		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--conf FILE] [--rom FILE]\n"
-		"            [--script FILE] [--pattern ILBM] [--drawer-pattern ILBM]\n");
+		"            [--script FILE] [--socket PATH] [--pattern ILBM] [--drawer-pattern ILBM]\n");
 }
 
 int main(int argc, char **argv)
@@ -393,17 +398,18 @@ int main(int argc, char **argv)
 		{ "conf", required_argument, NULL, 'c' },
 		{ "rom", required_argument, NULL, 'r' },
 		{ "script", required_argument, NULL, 'S' },
+		{ "socket", required_argument, NULL, 'k' },
 		{ "pattern", required_argument, NULL, 'p' },
 		{ "drawer-pattern", required_argument, NULL, 'P' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
 	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *conf = NULL, *script = NULL;
-	const char *pattern = NULL, *dpattern = NULL;
+	const char *sock = NULL, *pattern = NULL, *dpattern = NULL;
 	struct sigaction sa;
 	int o;
 
-	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:p:P:h", opts, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:k:p:P:h", opts, NULL)) != -1) {
 		switch (o) {
 		case 'm': mode = optarg; break;
 		case 'z': size = optarg; break;
@@ -411,6 +417,7 @@ int main(int argc, char **argv)
 		case 'c': conf = optarg; break;
 		case 'r': setenv("WBDE_ROM", optarg, 1); break;
 		case 'S': script = optarg; break;
+		case 'k': sock = optarg; break;
 		case 'p': pattern = optarg; break;
 		case 'P': dpattern = optarg; break;
 		default: usage(); return o == 'h' ? 0 : 1;
@@ -462,12 +469,14 @@ int main(int argc, char **argv)
 		disp_close(&D);
 		return 1;
 	}
+	server_open(&S, sock, env_pen, &ENV);
 	ENV.paldirty = 1;
 	screen_damage_all(&S);
 	flush();
 
 	if (script) {
 		run_script(script);
+		server_close();
 		disp_close(&D);
 		return 0;
 	}
@@ -478,27 +487,29 @@ int main(int argc, char **argv)
 
 	while (!W.quit && !got_quit) {
 		struct pollfd fds[64];
-		int ni, nc, timeout;
+		int ni, nc, ns, timeout;
 		uint64_t now;
 
 		ni = input_pollfds(fds, 4);
 		nc = con_pollfds(fds + ni, 32);
+		ns = server_pollfds(fds + ni + nc, 63 - ni - nc);
 		if (ctl_fd >= 0) {
-			fds[ni + nc].fd = ctl_fd;
-			fds[ni + nc].events = POLLIN;
-			fds[ni + nc].revents = 0;
+			fds[ni + nc + ns].fd = ctl_fd;
+			fds[ni + nc + ns].events = POLLIN;
+			fds[ni + nc + ns].revents = 0;
 		}
 		timeout = wm_busy(&S) ? 20 : 500;
 		if (input_poll_ms() > 0 && input_poll_ms() < timeout)
 			timeout = input_poll_ms();
-		if (poll(fds, (nfds_t)(ni + nc + (ctl_fd >= 0)), timeout) < 0 && errno != EINTR)
+		if (poll(fds, (nfds_t)(ni + nc + ns + (ctl_fd >= 0)), timeout) < 0 && errno != EINTR)
 			break;
 		now = now_ms();
 		W.now = now;
 		input_service(fds, ni, &CB);
 		input_tick(&CB);
 		con_service(&S, fds + ni, nc);
-		if (ctl_fd >= 0 && (fds[ni + nc].revents & POLLIN))
+		server_service(&S, fds + ni + nc, ns);
+		if (ctl_fd >= 0 && (fds[ni + nc + ns].revents & POLLIN))
 			ctl_service();
 		if (got_chld) {
 			got_chld = 0;
@@ -513,6 +524,7 @@ int main(int argc, char **argv)
 		}
 	}
 	input_close();
+	server_close();
 	disp_close(&D);
 	if (ctl_fd >= 0)
 		unlink(CTL_PATH);
