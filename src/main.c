@@ -129,9 +129,58 @@ static void cb_button(void *arg, int button, int down)
 	wm_button(s, button, down, input_qual(), now);
 }
 
+/*
+ * Intuition's mouse on the keyboard: Left Amiga + the cursor keys moves the
+ * pointer (faster with Shift), Left Amiga + Left Alt is the left button and
+ * Left Amiga + Right Alt the right one. For when the mouse cannot be
+ * used, as when amimouse cannot get its interrupt.
+ */
+static int kbd_mouse(struct screen *s, const struct keyev *k)
+{
+	static int held;	/* buttons pressed from the keyboard */
+	int step = (k->qual & QUAL_SHIFT) ? 32 : 4;
+
+	if (k->code == 125 && !k->down && held) {	/* Left Amiga let go */
+		if (held & 1)
+			cb_button(s, 1, 0);
+		if (held & 2)
+			cb_button(s, 2, 0);
+		held = 0;
+		return 1;
+	}
+	if (!(k->qual & QUAL_LAMIGA))
+		return 0;
+	switch (k->code) {
+	case 103: if (k->down) cb_motion(s, 0, -step); return 1;	/* up */
+	case 108: if (k->down) cb_motion(s, 0, step); return 1;		/* down */
+	case 105: if (k->down) cb_motion(s, -step, 0); return 1;	/* left */
+	case 106: if (k->down) cb_motion(s, step, 0); return 1;		/* right */
+	case 56:						/* Left Alt */
+	case 100:						/* Right Alt */
+		if (k->down == 2)
+			return 1;
+		{
+			int b = k->code == 56 ? 1 : 2;
+
+			if (k->down && !(held & b)) {
+				held |= b;
+				cb_button(s, b, 1);
+			} else if (!k->down && (held & b)) {
+				held &= ~b;
+				cb_button(s, b, 0);
+			}
+		}
+		return 1;
+	}
+	return 0;
+}
+
 static void cb_key(void *arg, const struct keyev *k)
 {
 	struct screen *s = arg;
+
+	if (kbd_mouse(s, k))
+		return;
 
 	if (k->down == 1 && (k->qual & QUAL_RAMIGA) && k->ch && !menu_is_open()) {
 		if (menu_shortcut(strip_for(s), k->ch))
