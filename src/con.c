@@ -37,7 +37,7 @@ struct con {
 	uint8_t *dirty;		/* per row */
 	int cx, cy;
 	int fg, inverse, bold;
-	int esc;
+	int esc, inter;
 	char escbuf[40];
 	int esclen;
 	int scrolled;
@@ -470,6 +470,7 @@ static void output(struct con *c, const char *buf, size_t n)
 			if (ch == '[') {
 				c->esc = 2;
 				c->esclen = 0;
+				c->inter = 0;
 			} else if (ch == ']') {
 				c->esc = 3;
 			} else {
@@ -478,15 +479,24 @@ static void output(struct con *c, const char *buf, size_t n)
 			continue;
 		}
 		if (c->esc == 2) {
-			if ((ch >= '0' && ch <= '9') || ch == ';' || ch == '?') {
+			/* ECMA-48: parameters 0x30-0x3f, intermediates 0x20-0x2f, final 0x40-0x7e */
+			if (ch >= 0x30 && ch <= 0x3f) {
 				if (c->esclen < (int)sizeof(c->escbuf) - 1)
 					c->escbuf[c->esclen++] = (char)ch;
 				continue;
 			}
+			if (ch >= 0x20 && ch <= 0x2f) {
+				c->inter = 1;
+				continue;
+			}
 			c->escbuf[c->esclen] = 0;
 			c->esc = 0;
-			csi(c, (char)ch);
-			continue;
+			if (ch >= 0x40 && ch <= 0x7e && !c->inter)
+				csi(c, (char)ch);
+			c->inter = 0;
+			if (ch >= 0x40)
+				continue;
+			/* a control character in the middle: act on it */
 		}
 		if (c->esc == 3) {
 			if (ch == 7 || ch == '\\')
@@ -496,13 +506,14 @@ static void output(struct con *c, const char *buf, size_t n)
 		c->dirty[c->cy] = 1;
 		switch (ch) {
 		case 27: c->esc = 1; break;
+		case 0x9b: c->esc = 2; c->esclen = 0; c->inter = 0; break;	/* Amiga's CSI */
 		case '\r': c->cx = 0; break;
 		case '\n': newline(c); break;
 		case '\b': if (c->cx > 0) c->cx--; break;
 		case '\t': c->cx = (c->cx + 8) & ~7; if (c->cx >= c->cols) c->cx = c->cols - 1; break;
 		case 7: break;
 		default:
-			if (ch < 32)
+			if (ch < 32 || (ch >= 0x80 && ch < 0xa0))
 				break;
 			if (c->cx >= c->cols) {
 				c->cx = 0;
