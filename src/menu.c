@@ -78,7 +78,11 @@ static int box_width(struct screen *s, const struct menuitem *items, int n)
 	int i, w = 0, check = needs_check(items, n) ? 14 : 0;
 
 	for (i = 0; i < n; i++) {
-		int iw = font_textlen(s->font, items[i].label, -1) + check;
+		int iw;
+
+		if ((items[i].flags & MI_BAR) || !items[i].label)
+			continue;
+		iw = font_textlen(s->font, items[i].label, -1) + check;
 
 		if (items[i].key)
 			iw += 11 + 4 + font_textlen(s->font, "M", 1) + 8;
