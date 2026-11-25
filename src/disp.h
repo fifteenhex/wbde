@@ -57,9 +57,25 @@ struct disp_ops {
 		     struct disp_buf *b, uint32_t *size);
 };
 
+/*
+ * What the display shows: the front screen's composition (src: d->fb for
+ * the Workbench screen, a client screen's own), screen pixel (x, y) at
+ * display pixel (ox + x * sx, oy + y * sy).  Outside it, the screen's
+ * colour 0, as an Amiga shows its border.
+ */
+struct disp_view {
+	struct bm *src;
+	int w, h;		/* the screen */
+	float sx, sy;
+	int ox, oy;
+	unsigned int gen;	/* bumped on every change */
+};
+
 struct disp {
 	struct bm fb;		/* the logical screen, what wbde draws */
 	int scale;		/* rows are shown this many times over */
+	int mw, mh;		/* the display mode */
+	struct disp_view view;
 	int composes;		/* ops->compose, not software composition */
 	int hw_pointer;		/* the pointer is not drawn into the screen */
 	const struct disp_ops *ops;
@@ -96,5 +112,10 @@ extern struct disp *disp_current;
 
 /* the composed screen as a PPM from d->fb (RAM: reading VRAM back is slow) */
 int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char *path);
+
+/* show src (a w x h screen) at that scale and offset */
+void disp_set_view(struct disp *d, struct bm *src, int w, int h, float sx, float sy, int ox, int oy);
+/* display pixel to screen pixel under the view; 0 outside it */
+int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y);
 
 #endif

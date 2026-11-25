@@ -449,25 +449,38 @@ void screen_init(struct screen *s, struct bm *fb, int depth, struct font *font)
 	s->font = font;
 	s->barh = font->ysize + 3;
 	s->ptr_key = -1;
+	s->sx = s->sy = 1;
 	bm_alloc(&s->root, s->w, s->h);
 	memset(s->root.px, PEN(s, P_BACKGROUND), (size_t)s->root.stride * s->root.h);
 	screen_draw_bar(s);
 }
 
-void screen_draw_bar(struct screen *s)
+/* the screen's title bar into rp (the root layer, or a client screen's bar window) */
+void screen_paint_bar(struct screen *s, struct rp *rp_in)
 {
-	struct rp rp;
+	struct rp rp = *rp_in;
 	/* the screen's depth gadget: a grey raised box down to the bar's bottom line */
 	struct rect g = rect_make(s->w - DEPTH_W, 0, DEPTH_W, s->barh);
 
-	rp_init(&rp, &s->root);
 	rp_fill(&rp, 0, 0, s->w, s->barh - 1, PEN(s, P_BARBLOCK));
 	rp_hline(&rp, 0, s->barh - 1, s->w, PEN(s, P_BARTRIM));
 	rp_text(&rp, s->font, 4, 1, s->title, -1, PEN(s, P_BARDETAIL), -1);
 	rp_fill(&rp, g.x, g.y, g.w, g.h, PEN(s, s->bar_depth_pressed ? P_FILL : P_BACKGROUND));
 	bevel_box(s, &rp, &g, s->bar_depth_pressed);
 	glyph_depth(s, &rp, &g, PEN(s, P_BARBLOCK));
-	g = rect_make(0, 0, s->w, s->barh);
+}
+
+void screen_draw_bar(struct screen *s)
+{
+	struct rp rp;
+	struct rect g = rect_make(0, 0, s->w, s->barh);
+
+	if (s->barwin) {
+		win_refresh(s, s->barwin);
+		return;
+	}
+	rp_init(&rp, &s->root);
+	screen_paint_bar(s, &rp);
 	screen_damage(s, &g);
 }
 
@@ -769,7 +782,20 @@ struct win *win_open(struct screen *s, const struct rect *r, unsigned int flags,
 		link_above(s, w, highest_backdrop(s));
 	else
 		link_above(s, w, s->top);
+	if ((flags & WF_BACKDROP) && s->barwin && s->barwin != w)
+		screen_place_bar(s);
 	return w;
+}
+
+void screen_place_bar(struct screen *s)
+{
+	struct win *b = s->barwin;
+
+	if (!b)
+		return;
+	unlink_win(s, b);
+	link_above(s, b, s->showtitle ? highest_backdrop(s) : NULL);
+	damage_win(s, b);
 }
 
 void win_close(struct screen *s, struct win *w)

@@ -177,10 +177,52 @@ GEM object exported with `DRM_IOCTL_PRIME_HANDLE_TO_FD`, for example from
 the render node, or a frame that another card writes into VRAM over PCI.
 `wbclient.h` has `wbc_attach()`.
 
+## Screens
+
+A client may open screens of its own, as an AmigaOS program opens a custom
+screen, each with its own size, depth, palette and windows.  The screens
+are a stack, the front one is on the display, and Workbench's is one of
+them.
+
+| message | payload | answer |
+|---|---|---|
+| `WBP_OPEN_SCREEN` | `wbp_newscreen` | `WBP_SCREEN_OPENED` (`wbp_screenbuf`) + the buffer's fd, `win` = the screen id |
+| `WBP_SCREEN_DAMAGE` | `wbp_rect`, screen coordinates | - |
+| `WBP_SCREEN_PALETTE` | `wbp_palette` (first, count) + count x r g b | - |
+| `WBP_SCREEN_TITLE` | `int32_t` showtitle (1, 0, or -1 unchanged), then the title | - |
+| `WBP_SCREEN_TO_FRONT`, `WBP_SCREEN_TO_BACK` | - | - |
+| `WBP_SCREEN_CLOSE` | - | its windows go with it |
+
+`win` in the header is the screen id for all of these.
+
+- `wbp_newscreen` has the width, height, depth (1-8), `WBP_SF_SHOWTITLE`,
+  the DrawInfo pens, the title, the first palette and the scale: display
+  pixels per screen pixel across and down, as num/den.  The client knows
+  the display mode (an Amiga ModeID) and so how big a pixel is; wbde only
+  fits the result to the monitor, centred, and scrolled with the pointer
+  when it is bigger than the monitor (Intuition's autoscroll).
+  Outside the screen the display shows the screen's colour 0, as an
+  Amiga shows its border.
+  amigafmt asks for whole numbers from the ModeID: low resolution 2
+  across, high 1, super-high 1/2; 2 down unless interlaced.
+- The screen's own pixels (what its RastPort draws, under every window)
+  are a buffer of pens like a window's (`wbp_screenbuf` has the size,
+  stride and bytes to map), and `WBP_SCREEN_DAMAGE` says where it
+  changed.
+- Windows open on it with `wbp_open.screen` = its id (a `wbp_open` without
+  that field, as version 1 clients send it, is on Workbench).  They are
+  ordinary wbde windows with wbde's frames.
+- The title bar is wbde's, drawn in the screen's pens with its depth
+  gadget, in front of backdrop windows with `WBP_SF_SHOWTITLE` (or
+  `WBP_SCREEN_TITLE` 1) and behind them otherwise.
+- The user flips screens the Amiga way: Left Amiga + M sends the front
+  screen to the back, Left Amiga + N brings Workbench to the front, and a
+  click on a screen's depth gadget sends that screen to the back.
+- A client that goes takes its screens with it.
+
 ## Not provided
 
-Screens other than Workbench's, busy pointer images, requesters drawn by
-wbde for a client (`EasyRequest` can be a client window), gadgets drawn by
-wbde inside the inner area (gadtools can be done client side), the
-clipboard, and AppIcons and AppWindows (dropping Workbench icons onto a
-window).
+Busy pointer images, requesters drawn by wbde for a client (`EasyRequest`
+can be a client window), gadgets drawn by wbde inside the inner area
+(gadtools can be done client side), the clipboard, and AppIcons and
+AppWindows (dropping Workbench icons onto a window).

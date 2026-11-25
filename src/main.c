@@ -22,12 +22,14 @@
 #include "input.h"
 #include "menu.h"
 #include "prefs.h"
+#include "screens.h"
 #include "server.h"
 #include "wb.h"
 #include "wm.h"
 
 static struct disp D;
-static struct screen S;
+static struct screen S;			/* the Workbench screen */
+static struct screen *front = &S, *stack = &S;	/* the screen stack, front first */
 static struct wbenv ENV;
 static struct wb W;
 static volatile sig_atomic_t got_chld, got_quit, got_shot;
@@ -82,19 +84,220 @@ static const struct menustrip *strip_for(struct screen *s)
 	return s->menus;
 }
 
-static void cb_motion(void *arg, int dx, int dy)
-{
-	struct screen *s = arg;
-	uint64_t now = now_ms();
+/* ---- the screen stack ---- */
 
-	wm_motion(s, s->mx + dx, s->my + dy, now);
+/* where the front screen sits on the display: centred, or scrolled to the pointer */
+static void view_update(void)
+{
+	struct screen *s = front;
+	int vw = (int)(s->w * s->sx + 0.5f), vh = (int)(s->h * s->sy + 0.5f);
+
+	if (vw <= D.mw)
+		s->ox = (D.mw - vw) / 2;
+	else {
+		int px = s->ox + (int)(s->mx * s->sx);
+
+		if (px < 0)
+			s->ox -= px;
+		if (px >= D.mw)
+			s->ox -= px - D.mw + 1;
+		if (s->ox > 0)
+			s->ox = 0;
+		if (s->ox < D.mw - vw)
+			s->ox = D.mw - vw;
+	}
+	if (vh <= D.mh)
+		s->oy = (D.mh - vh) / 2;
+	else {
+		int py = s->oy + (int)(s->my * s->sy);
+
+		if (py < 0)
+			s->oy -= py;
+		if (py >= D.mh)
+			s->oy -= py - D.mh + 1;
+		if (s->oy > 0)
+			s->oy = 0;
+		if (s->oy < D.mh - vh)
+			s->oy = D.mh - vh;
+	}
+	disp_set_view(&D, s->fb, s->w, s->h, s->sx, s->sy, s->ox, s->oy);
+}
+
+void screens_fit(struct screen *s)
+{
+	(void)s;
+	view_update();
+}
+
+static void set_front(struct screen *n)
+{
+	struct screen *old = front;
+	float X, Y;
+
+	if (n == old)
+		return;
+	if (menu_is_open())
+		menu_close(old);
+	/* the pointer stays where it is on the display */
+	X = old->ox + old->fx * old->sx;
+	Y = old->oy + old->fy * old->sy;
+	front = n;
+	n->fx = (X - n->ox) / n->sx;
+	n->fy = (Y - n->oy) / n->sy;
+	if (n->fx < 0) n->fx = 0;
+	if (n->fy < 0) n->fy = 0;
+	if (n->fx > n->w - 1) n->fx = (float)(n->w - 1);
+	if (n->fy > n->h - 1) n->fy = (float)(n->h - 1);
+	n->mx = (int)n->fx;
+	n->my = (int)n->fy;
+	view_update();
+	disp_palette(&D, n->palette);
+	screen_damage_all(n);
+}
+
+static void restack(void)
+{
+	set_front(stack);
+}
+
+void screens_add(struct screen *s)
+{
+	s->next = stack;
+	stack = s;
+	s->hw_pointer = D.hw_pointer;
+	if (!s->ptr)
+		screen_set_pointer(s, S.ptr, S.ptr_hx, S.ptr_hy, S.ptr_key);
+	restack();
+}
+
+void screens_remove(struct screen *s)
+{
+	struct screen **pp;
+
+	if (s == &S)
+		return;
+	for (pp = &stack; *pp; pp = &(*pp)->next)
+		if (*pp == s) {
+			*pp = s->next;
+			break;
+		}
+	s->next = NULL;
+	if (front == s) {
+		front = stack;		/* without the pointer mapping: s is going */
+		front->fx = (float)front->mx;
+		front->fy = (float)front->my;
+		view_update();
+		disp_palette(&D, front->palette);
+		screen_damage_all(front);
+		if (menu_is_open())
+			menu_close(front);
+	}
+}
+
+void screens_to_front(struct screen *s)
+{
+	struct screen **pp;
+
+	for (pp = &stack; *pp; pp = &(*pp)->next)
+		if (*pp == s) {
+			*pp = s->next;
+			s->next = stack;
+			stack = s;
+			break;
+		}
+	restack();
+}
+
+void screens_to_back(struct screen *s)
+{
+	struct screen **pp, *last;
+
+	if (!stack->next)
+		return;
+	for (pp = &stack; *pp; pp = &(*pp)->next)
+		if (*pp == s) {
+			*pp = s->next;
+			break;
+		}
+	for (last = stack; last->next; last = last->next)
+		;
+	last->next = s;
+	s->next = NULL;
+	restack();
+}
+
+struct screen *screens_front(void)
+{
+	return front;
+}
+
+struct screen *screens_wb(void)
+{
+	return &S;
+}
+
+void screens_palette(struct screen *s)
+{
+	if (s == front)
+		disp_palette(&D, s->palette);
+}
+
+/* the Workbench screen's depth gadget */
+static void wb_bar_depth(struct screen *s)
+{
+	if (front == s)
+		screens_to_back(s);
+	else
+		screens_to_front(s);
+}
+
+/* ---- input ---- */
+
+static void pointer_moved(struct screen *s, uint64_t now)
+{
+	int ox = s->ox, oy = s->oy;
+
+	if (s->fx < 0) s->fx = 0;
+	if (s->fy < 0) s->fy = 0;
+	if (s->fx > s->w - 1) s->fx = (float)(s->w - 1);
+	if (s->fy > s->h - 1) s->fy = (float)(s->h - 1);
+	wm_motion(s, (int)s->fx, (int)s->fy, now);
+	view_update();
+	if (s->ox != ox || s->oy != oy)
+		screen_damage_all(s);		/* it scrolled */
 	if (menu_is_open())
 		menu_motion(s, s->mx, s->my);
 }
 
+/*
+ * A move from the mouse, in Workbench pixels across and Workbench rows
+ * down (each row D.scale display lines): the same distance on the display
+ * on every screen, so a lores screen's pointer is no faster than
+ * Workbench's.
+ */
+static void cb_motion(void *arg, int dx, int dy)
+{
+	struct screen *s = front;
+
+	(void)arg;
+	s->fx += dx / s->sx;
+	s->fy += dy * D.scale / s->sy;
+	pointer_moved(s, now_ms());
+}
+
+/* the control FIFO's coordinates are the front screen's own */
+static void pointer_to(int x, int y)
+{
+	struct screen *s = front;
+
+	s->fx = (float)x;
+	s->fy = (float)y;
+	pointer_moved(s, now_ms());
+}
+
 static void cb_button(void *arg, int button, int down)
 {
-	struct screen *s = arg;
+	struct screen *s = front;
 	uint64_t now = now_ms();
 
 	W.now = now;
@@ -116,6 +319,7 @@ static void cb_button(void *arg, int button, int down)
 	}
 	if (menu_is_open())
 		return;
+	(void)arg;
 	wm_button(s, button, down, input_qual(), now);
 }
 
@@ -167,8 +371,9 @@ static int kbd_mouse(struct screen *s, const struct keyev *k)
 
 static void cb_key(void *arg, const struct keyev *k)
 {
-	struct screen *s = arg;
+	struct screen *s = front;
 
+	(void)arg;
 	if (kbd_mouse(s, k))
 		return;
 
@@ -177,7 +382,14 @@ static void cb_key(void *arg, const struct keyev *k)
 			return;
 	}
 	if (k->down && (k->qual & QUAL_LAMIGA) && (k->ch == 'm' || k->ch == 'n')) {
-		/* LAmiga-M/N flip screens; there is only one */
+		/* Intuition's: Left Amiga + M sends the front screen to the back,
+		   + N brings Workbench to the front */
+		if (k->down == 1) {
+			if (k->ch == 'm')
+				screens_to_back(front);
+			else
+				screens_to_front(&S);
+		}
 		return;
 	}
 	wm_key(s, k);
@@ -194,25 +406,25 @@ static void flush(void)
 	if (ENV.paldirty) {
 		ENV.paldirty = 0;
 		memcpy(S.palette, ENV.pal, sizeof(S.palette));
-		disp_palette(&D, ENV.pal);
+		screens_palette(&S);
 	}
 	if (D.composes) {
 		/* the display draws the damage itself (and moves its pointer) */
 		D.timing[0] = 0;
-		D.ops->compose(&D, &S);
+		D.ops->compose(&D, front);
 		if (timing && D.timing[0])
 			fprintf(stderr, "wbde: %s\n", D.timing);
 		return;
 	}
-	if (S.ndamage) {
+	if (front->ndamage) {
 		struct timespec t0, t1, t2;
 		long area = 0;
 		int i;
 
-		for (i = 0; i < S.ndamage; i++)
-			area += (long)S.damage[i].w * S.damage[i].h;
+		for (i = 0; i < front->ndamage; i++)
+			area += (long)front->damage[i].w * front->damage[i].h;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
-		screen_flush(&S, disp_touch, &D);
+		screen_flush(front, disp_touch, &D);
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		disp_present(&D);
 		clock_gettime(CLOCK_MONOTONIC, &t2);
@@ -226,7 +438,7 @@ static void flush(void)
 static void shot(const char *path)
 {
 	flush();
-	if (D.ops->shot ? D.ops->shot(&D, &S, path) : disp_screenshot(&D, ENV.pal, path))
+	if (D.ops->shot ? D.ops->shot(&D, front, path) : disp_screenshot(&D, front->palette, path))
 		fprintf(stderr, "wbde: cannot write %s\n", path);
 	else
 		fprintf(stderr, "wbde: screenshot %s\n", path);
@@ -255,46 +467,70 @@ static void command(const char *line)
 	advance(20);
 	wb_tick(&W, W.now);
 	if (sscanf(line, "move %d %d", &a, &b) == 2) {
-		cb_motion(&S, a - S.mx, b - S.my);
+		pointer_to(a, b);
 	} else if (sscanf(line, "down %d", &a) == 1) {
-		cb_button(&S, a, 1);
+		cb_button(front, a, 1);
 	} else if (sscanf(line, "up %d", &a) == 1) {
-		cb_button(&S, a, 0);
+		cb_button(front, a, 0);
 	} else if (sscanf(line, "click %d %d", &a, &b) == 2) {
-		cb_motion(&S, a - S.mx, b - S.my);
-		cb_button(&S, 1, 1);
-		cb_button(&S, 1, 0);
+		pointer_to(a, b);
+		cb_button(front, 1, 1);
+		cb_button(front, 1, 0);
 	} else if (sscanf(line, "dclick %d %d", &a, &b) == 2) {
-		cb_motion(&S, a - S.mx, b - S.my);
-		cb_button(&S, 1, 1);
-		cb_button(&S, 1, 0);
+		pointer_to(a, b);
+		cb_button(front, 1, 1);
+		cb_button(front, 1, 0);
 		advance(100);
-		cb_button(&S, 1, 1);
-		cb_button(&S, 1, 0);
+		cb_button(front, 1, 1);
+		cb_button(front, 1, 0);
+	} else if (sscanf(line, "drag %d %d %d %d", &a, &b, &c, &d) == 4) {
+		/* press at one place, move there in steps, let go */
+		int i;
+
+		pointer_to(a, b);
+		cb_button(front, 1, 1);
+		for (i = 1; i <= 8; i++)
+			pointer_to(a + (c - a) * i / 8, b + (d - b) * i / 8);
+		cb_button(front, 1, 0);
 	} else if (sscanf(line, "menu %d %d %d %d", &a, &b, &c, &d) == 4) {
-		cb_motion(&S, a - S.mx, b - S.my);
-		cb_button(&S, 2, 1);
-		cb_motion(&S, c - S.mx, d - S.my);
+		pointer_to(a, b);
+		cb_button(front, 2, 1);
+		pointer_to(c, d);
 		if (!strstr(line, "hold"))
-			cb_button(&S, 2, 0);
+			cb_button(front, 2, 0);
 	} else if (sscanf(line, "key %d %d", &a, &b) >= 1) {
 		struct keyev k = { (uint16_t)a, 1, 0, 0 };
 
 		if (sscanf(line, "key %d %d", &a, &b) == 2)
 			k.qual = (unsigned int)b;
 		k.ch = input_keychar(a, k.qual);
-		cb_key(&S, &k);
+		cb_key(front, &k);
 		k.down = 0;
-		cb_key(&S, &k);
+		cb_key(front, &k);
 	} else if (sscanf(line, "type %399[^\n]", arg) == 1) {
 		char *p;
 
 		for (p = arg; *p; p++) {
 			struct keyev k = { 0, 1, (unsigned char)*p, 0 };
+			int c, q;
 
-			if (*p == '|')
+			if (*p == '|') {
 				k.code = 28;	/* Return */
-			cb_key(&S, &k);
+				k.ch = '\n';
+			}
+			/* the key that makes it, so clients get a RAWKEY as from a keyboard */
+			for (c = 1; c < 58 && !k.code; c++)
+				for (q = 0; q < 2; q++)
+					if (input_keychar(c, q ? QUAL_LSHIFT : 0) == (unsigned char)*p) {
+						k.code = (uint16_t)c;
+						k.qual = q ? QUAL_LSHIFT : 0;
+						break;
+					}
+			cb_key(front, &k);
+			if (k.code) {
+				k.down = 0;
+				cb_key(front, &k);
+			}
 		}
 	} else if (sscanf(line, "wait %d", &a) == 1 && scripted) {
 		uint64_t until = vclock + (uint64_t)a;
@@ -315,7 +551,7 @@ static void command(const char *line)
 				con_reap(&S);
 			}
 			vclock += 10;
-			wm_tick(&S, vclock);
+			wm_tick(front, vclock);
 		}
 	} else if (sscanf(line, "shot %399s", arg) == 1) {
 		shot(arg);
@@ -323,7 +559,11 @@ static void command(const char *line)
 	} else if (!strncmp(line, "quit", 4)) {
 		W.quit = 1;
 	} else if (!strncmp(line, "redraw", 6)) {
-		screen_damage_all(&S);
+		screen_damage_all(front);
+	} else if (!strncmp(line, "screen back", 11)) {
+		screens_to_back(front);
+	} else if (!strncmp(line, "screen wb", 9)) {
+		screens_to_front(&S);
 	}
 	flush();
 }
@@ -462,10 +702,15 @@ int main(int argc, char **argv)
 
 	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
 	S.hw_pointer = D.hw_pointer;
+	S.sy = (float)D.scale;
+	S.bar_depth = wb_bar_depth;
 	memcpy(S.palette, ENV.pal, sizeof(S.palette));
 	S.flush_now = flush;
 	S.mx = S.w / 2;
 	S.my = S.h / 2;
+	S.fx = (float)S.mx;
+	S.fy = (float)S.my;
+	view_update();
 	screen_set_pointer(&S, &ENV.pointer, ENV.ptr_hx, ENV.ptr_hy, 0);
 	if (wb_init(&W, &S, &ENV, conf)) {
 		disp_close(&D);
@@ -500,7 +745,7 @@ int main(int argc, char **argv)
 			fds[ni + nc + ns].events = POLLIN;
 			fds[ni + nc + ns].revents = 0;
 		}
-		timeout = wm_busy(&S) ? 20 : 500;
+		timeout = wm_busy(front) ? 20 : 500;
 		if (input_poll_ms() > 0 && input_poll_ms() < timeout)
 			timeout = input_poll_ms();
 		if (poll(fds, (nfds_t)(ni + nc + ns + (ctl_fd >= 0)), timeout) < 0 && errno != EINTR)
@@ -517,7 +762,7 @@ int main(int argc, char **argv)
 			got_chld = 0;
 			con_reap(&S);
 		}
-		wm_tick(&S, now);
+		wm_tick(front, now);
 		wb_tick(&W, now);
 		flush();
 		if (got_shot) {

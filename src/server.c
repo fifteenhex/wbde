@@ -20,6 +20,7 @@
 #include "disp.h"
 #include "font.h"
 #include "menu.h"
+#include "screens.h"
 #include "server.h"
 #include "wbde_proto.h"
 
@@ -32,6 +33,7 @@ struct cwin {
 	struct cwin *next;
 	struct client *c;
 	uint32_t id;
+	struct screen *scr;	/* Workbench's, or one of the client's */
 	struct win *w;
 	int memfd;
 	uint8_t *shm;
@@ -47,12 +49,26 @@ struct cwin {
 	char *labels;
 };
 
+/* a screen of the client's: wbde's struct screen, its pixels shared */
+struct cscreen {
+	struct cscreen *next;
+	struct client *c;
+	uint32_t id;
+	struct screen s;
+	struct bm fb;		/* where it is composed (software display, screenshots) */
+	int memfd;
+	uint8_t *shm;
+	size_t shmsize;
+	struct bm view;		/* the shared buffer as a bitmap */
+};
+
 struct client {
 	int fd;
 	char name[32];
 	uint8_t *rbuf;
 	size_t rlen;
 	struct cwin *wins;
+	struct cscreen *screens;
 	int dead;
 	int fd_in;		/* the last fd the client sent, for WBP_ATTACH */
 };
@@ -203,7 +219,7 @@ static int make_buffer(struct cwin *cw, int w, int h)
 		close(fd);
 		return -errno;
 	}
-	memset(p, S->pens[P_BACKGROUND], size);
+	memset(p, cw->scr->pens[P_BACKGROUND], size);
 	/* keep what was there, top left anchored */
 	if (cw->shm) {
 		int y, cw_ = cw->view.w < w ? cw->view.w : w;
@@ -250,7 +266,7 @@ static void cw_draw(struct win *w, struct rp *rp)
 
 	/* content the display draws itself (VRAM): nothing of it here */
 	if (cw->vram || cw->attached || !cw->view.px) {
-		rp_fill(rp, 0, 0, rp->clip.w, rp->clip.h, S->pens[P_BACKGROUND]);
+		rp_fill(rp, 0, 0, rp->clip.w, rp->clip.h, cw->scr->pens[P_BACKGROUND]);
 		return;
 	}
 	rp_blit(rp, 0, 0, &cw->view, 0, 0, cw->view.w, cw->view.h, -1);
@@ -276,7 +292,7 @@ static void cw_key(struct win *w, const struct keyev *k)
 {
 	struct cwin *cw = w->priv;
 	int raw = amiga_rawkey(k->code);
-	int mx = S->mx - w->r.x - w->bl, my = S->my - w->r.y - w->bt;
+	int mx = cw->scr->mx - w->r.x - w->bl, my = cw->scr->my - w->r.y - w->bt;
 
 	if (raw != 0xff)
 		send_event(cw, IDCMP_RAWKEY, (uint16_t)(raw | (k->down ? 0 : IECODE_UP_PREFIX)),
@@ -430,7 +446,7 @@ static void destroy_win(struct cwin *cw)
 			break;
 		}
 	if (cw->w)
-		win_close(S, cw->w);	/* and the display's content with it */
+		win_close(cw->scr, cw->w);	/* and the display's content with it */
 	cw->w = NULL;
 	free_menus(cw);
 	if (cw->shm)
@@ -501,6 +517,179 @@ static void send_error(struct client *c, const struct wbp_hdr *h, int err)
 	send_msg(c, WBP_ERROR, h->win, h->serial, &e, sizeof(e), -1);
 }
 
+static struct cscreen *find_screen(struct client *c, uint32_t id)
+{
+	struct cscreen *cs;
+
+	for (cs = c->screens; cs; cs = cs->next)
+		if (cs->id == id)
+			return cs;
+	return NULL;
+}
+
+/* --- screens --- */
+
+/* a client screen's title bar is a borderless window of wbde's own */
+static void bar_draw(struct win *w, struct rp *rp)
+{
+	screen_paint_bar(w->priv, rp);
+}
+
+static void bar_button(struct win *w, int x, int y, int button, int down, unsigned int qual)
+{
+	struct screen *s = w->priv;
+
+	(void)y;
+	(void)qual;
+	/* the screen depth gadget (the right 23 pixels): this screen to the back */
+	if (button == 1 && !down && x >= s->w - 23)
+		screens_to_back(s);
+}
+
+static const struct win_ops bar_ops = {
+	.draw = bar_draw,
+	.button = bar_button,
+};
+
+static void cs_bar_depth(struct screen *s)
+{
+	screens_to_back(s);
+}
+
+static void do_open_screen(struct client *c, const struct wbp_hdr *h, const struct wbp_newscreen *n)
+{
+	struct cscreen *cs;
+	struct wbp_screenbuf m;
+	struct rect r;
+	int w = n->width, ht = n->height, stride, i;
+	char title[81];
+
+	if (w < 16 || ht < 16 || w > 4096 || ht > 4096 || n->depth < 1 || n->depth > 8 ||
+	    !n->sx_num || !n->sx_den || !n->sy_num || !n->sy_den) {
+		send_error(c, h, EINVAL);
+		return;
+	}
+	cs = calloc(1, sizeof(*cs));
+	if (!cs || bm_alloc(&cs->fb, w, ht)) {
+		free(cs);
+		send_error(c, h, ENOMEM);
+		return;
+	}
+	cs->c = c;
+	cs->id = next_id++;
+	stride = (w + 3) & ~3;
+	cs->shmsize = (size_t)stride * ht;
+	cs->memfd = memfd_create("wbde-screen", MFD_CLOEXEC);
+	if (cs->memfd < 0 || ftruncate(cs->memfd, (off_t)cs->shmsize) ||
+	    (cs->shm = mmap(NULL, cs->shmsize, PROT_READ | PROT_WRITE, MAP_SHARED, cs->memfd, 0)) ==
+	    MAP_FAILED) {
+		if (cs->memfd >= 0)
+			close(cs->memfd);
+		bm_free(&cs->fb);
+		free(cs);
+		send_error(c, h, ENOMEM);
+		return;
+	}
+	memset(cs->shm, 0, cs->shmsize);
+	cs->view.px = cs->shm;
+	cs->view.w = w;
+	cs->view.h = ht;
+	cs->view.stride = stride;
+
+	screen_init(&cs->s, &cs->fb, n->depth, S->font);
+	for (i = 0; i < WBP_NUMPENS && i < NPENS; i++)
+		cs->s.pens[i] = n->pens[i];
+	memcpy(cs->s.palette, n->palette, sizeof(cs->s.palette));
+	cs->s.ncolours = 1 << n->depth;
+	cs->s.sx = (float)n->sx_num / n->sx_den;
+	cs->s.sy = (float)n->sy_num / n->sy_den;
+	cs->s.id = (int)cs->id;
+	cs->s.owner = cs;
+	cs->s.bar_depth = cs_bar_depth;
+	cs->s.showtitle = (n->flags & WBP_SF_SHOWTITLE) != 0;
+	cs->s.flush_now = S->flush_now;
+	cs->s.mx = w / 2;
+	cs->s.my = ht / 2;
+	cs->s.fx = (float)cs->s.mx;
+	cs->s.fy = (float)cs->s.my;
+	memcpy(title, n->title, 80);
+	title[80] = 0;
+	snprintf(cs->s.title, sizeof(cs->s.title), "%s", title);
+	/* the screen's own pixels start as the client's (all pen 0) */
+	memset(cs->s.root.px, 0, (size_t)cs->s.root.stride * cs->s.root.h);
+	bm_dirty_all(&cs->s.root);
+	r = rect_make(0, 0, w, cs->s.barh);
+	cs->s.barwin = win_open(&cs->s, &r, WF_BORDERLESS | WF_BACKDROP | WF_NOACTIVATE, "",
+				&bar_ops, &cs->s);
+	screen_place_bar(&cs->s);
+	if (cs->s.barwin)
+		win_refresh(&cs->s, cs->s.barwin);
+	cs->next = c->screens;
+	c->screens = cs;
+	screens_add(&cs->s);
+
+	memset(&m, 0, sizeof(m));
+	m.width = (uint16_t)w;
+	m.height = (uint16_t)ht;
+	m.stride = (uint16_t)stride;
+	m.barheight = (uint16_t)cs->s.barh;
+	m.wbortop = (uint16_t)wm_title_height(&cs->s);
+	m.wborleft = 4;
+	m.wborright = 18;
+	m.wborbottom = 10;
+	m.size = (uint32_t)cs->shmsize;
+	send_msg(c, WBP_SCREEN_OPENED, cs->id, h->serial, &m, sizeof(m), cs->memfd);
+}
+
+static void destroy_win(struct cwin *cw);
+
+static void destroy_screen(struct cscreen *cs)
+{
+	struct cscreen **p;
+	struct cwin *cw, *next;
+
+	for (cw = cs->c->wins; cw; cw = next) {
+		next = cw->next;
+		if (cw->scr == &cs->s)
+			destroy_win(cw);
+	}
+	for (p = &cs->c->screens; *p; p = &(*p)->next)
+		if (*p == cs) {
+			*p = cs->next;
+			break;
+		}
+	screens_remove(&cs->s);
+	while (cs->s.top)
+		win_close(&cs->s, cs->s.top);
+	bm_free(&cs->s.root);
+	bm_free(&cs->fb);
+	munmap(cs->shm, cs->shmsize);
+	close(cs->memfd);
+	free(cs);
+}
+
+static void screen_damage_from(struct cscreen *cs, const struct wbp_rect *r)
+{
+	struct rp rp;
+	struct rect d = rect_make(r->x, r->y, r->w, r->h);
+
+	rp_init(&rp, &cs->s.root);
+	rp_blit(&rp, r->x, r->y, &cs->view, r->x, r->y, r->w, r->h, -1);
+	screen_damage(&cs->s, &d);
+}
+
+static void screen_palette_from(struct cscreen *cs, const uint8_t *p, uint32_t len)
+{
+	const struct wbp_palette *wp = (const struct wbp_palette *)p;
+	unsigned int i;
+
+	if (len < sizeof(*wp))
+		return;
+	for (i = 0; i < wp->count && wp->first + i < 256 && sizeof(*wp) + 3 * (i + 1) <= len; i++)
+		memcpy(cs->s.palette[wp->first + i], p + sizeof(*wp) + 3 * i, 3);
+	screens_palette(&cs->s);
+}
+
 static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_open *o)
 {
 	unsigned int flags = o->flags & (WF_CLOSE | WF_DEPTH | WF_ZOOM | WF_SIZE | WF_DRAG |
@@ -519,12 +708,23 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	cw->c = c;
 	cw->id = next_id++;
 	cw->memfd = -1;
+	cw->scr = S;
+	if (h->len >= sizeof(struct wbp_open) && o->screen) {
+		struct cscreen *cs = find_screen(c, o->screen);
+
+		if (!cs) {
+			free(cw);
+			send_error(c, h, ENOENT);
+			return;
+		}
+		cw->scr = &cs->s;
+	}
 	cw->idcmp = o->idcmp;
 	/* in VRAM only if asked and the display composes; else the usual memfd */
 	cw->vram = (o->flags & WBP_WF_VRAM) && disp_current && disp_current->ops->share;
 	/* the client gives the inner size; borders are the window core's business */
 	r = rect_make(o->left, o->top, o->width, o->height);
-	cw->w = win_open(S, &r, flags, title, &cw_ops, cw);
+	cw->w = win_open(cw->scr, &r, flags, title, &cw_ops, cw);
 	if (!cw->w) {
 		free(cw);
 		send_error(c, h, ENOMEM);
@@ -541,7 +741,7 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	if (o->maxheight)
 		cw->w->maxh = o->maxheight + cw->w->bt + cw->w->bb;
 	cw->w->wants_motion = (o->flags & WBP_WF_REPORTMOUSE) != 0;
-	win_move_size(S, cw->w, &r);
+	win_move_size(cw->scr, cw->w, &r);
 	win_inner(cw->w, &in);
 	ret = make_buffer(cw, in.w, in.h);
 	if (ret && cw->vram) {		/* no VRAM to be had: the ordinary buffer */
@@ -549,7 +749,7 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 		ret = make_buffer(cw, in.w, in.h);
 	}
 	if (ret) {
-		win_close(S, cw->w);
+		win_close(cw->scr, cw->w);
 		free(cw);
 		send_error(c, h, -ret);
 		return;
@@ -557,8 +757,8 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	cw->next = c->wins;
 	c->wins = cw;
 	if (o->flags & WBP_WF_ACTIVATE)
-		win_activate(S, cw->w);
-	win_refresh(S, cw->w);
+		win_activate(cw->scr, cw->w);
+	win_refresh(cw->scr, cw->w);
 	send_window(cw, h->serial);
 }
 
@@ -573,7 +773,7 @@ static void do_damage(struct cwin *cw, const struct wbp_rect *r)
 		if (cw->attached) {
 			/* an attached buffer is scaled to the inner area: all of it */
 			d = rect_make(cw->w->r.x + in.x, cw->w->r.y + in.y, in.w, in.h);
-			screen_damage(S, &d);
+			screen_damage(cw->scr, &d);
 			return;
 		}
 	} else {
@@ -586,7 +786,7 @@ static void do_damage(struct cwin *cw, const struct wbp_rect *r)
 	d = rect_make(cw->w->r.x + in.x + r->x, cw->w->r.y + in.y + r->y, r->w, r->h);
 	if (!rect_intersect(&d, &d, &cw->w->r))
 		return;
-	screen_damage(S, &d);
+	screen_damage(cw->scr, &d);
 }
 
 /*
@@ -610,7 +810,7 @@ static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h
 	if (fd < 0) {			/* detach: back to the window's own buffer */
 		disp_detach(disp_current, cw->w);
 		cw->attached = 0;
-		win_refresh(S, cw->w);
+		win_refresh(cw->scr, cw->w);
 		send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
 		return;
 	}
@@ -627,26 +827,70 @@ static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h
 		return;
 	}
 	cw->attached = 1;
-	win_refresh(S, cw->w);
+	win_refresh(cw->scr, cw->w);
 	send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
 }
 
 static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 {
-	struct cwin *cw = h->win ? find_win(c, h->win) : NULL;
+	int screen_msg = h->type >= WBP_OPEN_SCREEN && h->type <= WBP_SCREEN_TITLE;
+	struct cwin *cw = h->win && !screen_msg ? find_win(c, h->win) : NULL;
+	struct cscreen *cs = h->win && screen_msg ? find_screen(c, h->win) : NULL;
 
-	if (h->win && !cw && h->type != WBP_HELLO) {
+	if (h->win && !cw && !cs && h->type != WBP_HELLO && h->type != WBP_OPEN_SCREEN) {
 		send_error(c, h, ENOENT);
 		return;
 	}
 	switch (h->type) {
+	case WBP_OPEN_SCREEN:
+		if (h->len >= sizeof(struct wbp_newscreen))
+			do_open_screen(c, h, (const struct wbp_newscreen *)p);
+		else
+			send_error(c, h, EINVAL);
+		break;
+	case WBP_SCREEN_CLOSE:
+		if (cs)
+			destroy_screen(cs);
+		break;
+	case WBP_SCREEN_DAMAGE:
+		if (cs && h->len >= sizeof(struct wbp_rect))
+			screen_damage_from(cs, (const struct wbp_rect *)p);
+		break;
+	case WBP_SCREEN_PALETTE:
+		if (cs)
+			screen_palette_from(cs, p, h->len);
+		break;
+	case WBP_SCREEN_TO_FRONT:
+		if (cs)
+			screens_to_front(&cs->s);
+		break;
+	case WBP_SCREEN_TO_BACK:
+		if (cs)
+			screens_to_back(&cs->s);
+		break;
+	case WBP_SCREEN_TITLE:
+		if (cs && h->len >= 4) {
+			int32_t show;
+			size_t n = h->len - 4 < sizeof(cs->s.title) - 1 ? h->len - 4 :
+				   sizeof(cs->s.title) - 1;
+
+			memcpy(&show, p, 4);
+			memcpy(cs->s.title, p + 4, n);
+			cs->s.title[n] = 0;
+			if (show >= 0 && show != cs->s.showtitle) {
+				cs->s.showtitle = show;
+				screen_place_bar(&cs->s);
+			}
+			screen_draw_bar(&cs->s);
+		}
+		break;
 	case WBP_HELLO:
 		if (h->len >= sizeof(struct wbp_hello))
 			snprintf(c->name, sizeof(c->name), "%.31s", ((const struct wbp_hello *)p)->name);
 		send_screen(c, h->serial);
 		break;
 	case WBP_OPEN:
-		if (h->len >= sizeof(struct wbp_open))
+		if (h->len >= WBP_OPEN_V1_SIZE)
 			do_open(c, h, (const struct wbp_open *)p);
 		else
 			send_error(c, h, EINVAL);
@@ -666,7 +910,7 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 
 			memcpy(t, p, n);
 			t[n] = 0;
-			win_set_title(S, cw->w, t);
+			win_set_title(cw->scr, cw->w, t);
 		}
 		break;
 	case WBP_MOVE_SIZE:
@@ -675,20 +919,20 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 			struct rect nr = rect_make(r->x, r->y, r->w + cw->w->bl + cw->w->br,
 						   r->h + cw->w->bt + cw->w->bb);
 
-			win_move_size(S, cw->w, &nr);
+			win_move_size(cw->scr, cw->w, &nr);
 		}
 		break;
 	case WBP_TO_FRONT:
 		if (cw)
-			win_to_front(S, cw->w);
+			win_to_front(cw->scr, cw->w);
 		break;
 	case WBP_TO_BACK:
 		if (cw)
-			win_to_back(S, cw->w);
+			win_to_back(cw->scr, cw->w);
 		break;
 	case WBP_ACTIVATE:
 		if (cw)
-			win_activate(S, cw->w);
+			win_activate(cw->scr, cw->w);
 		break;
 	case WBP_SET_MENUS:
 		if (cw)
@@ -723,6 +967,8 @@ static void drop_client(int i)
 
 	while (c->wins)
 		destroy_win(c->wins);
+	while (c->screens)
+		destroy_screen(c->screens);
 	if (c->fd_in >= 0)
 		close(c->fd_in);
 	close(c->fd);

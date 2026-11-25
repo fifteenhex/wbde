@@ -16,6 +16,7 @@
 struct priv {
 	void *cntx;
 	struct bm phys;		/* smol2d's backbuffer */
+	unsigned int gen;	/* the view phys was last cleared for */
 };
 
 static int soft_open(struct disp *d, const char *mode, const char *size)
@@ -56,6 +57,8 @@ static int soft_open(struct disp *d, const char *mode, const char *size)
 	} else {
 		d->fb = p->phys;
 	}
+	d->mw = p->phys.w;
+	d->mh = p->phys.h;
 	snprintf(d->desc, sizeof(d->desc), "smol2d DRM, %dx%d C8, screen %dx%d",
 		 p->phys.w, p->phys.h, d->fb.w, d->fb.h);
 	return 0;
@@ -75,19 +78,72 @@ static void soft_palette(struct disp *d, const uint8_t pal[256][3])
 	smol2d_setpalette(((struct priv *)d->priv)->cntx, &p);
 }
 
+/*
+ * r of the view's screen to the backbuffer, scaled.  Scaling happens RAM
+ * to RAM; only the result crosses the bus.  The Workbench screen (sx 1,
+ * whole rows doubled) is a memcpy a row.
+ */
 static void soft_touch(struct disp *d, const struct rect *r)
 {
 	struct priv *p = d->priv;
-	struct smol2d_rect sr = { r->x, r->y * d->scale, (unsigned int)r->w,
-				  (unsigned int)(r->h * d->scale) };
-	int y, k;
+	const struct disp_view *v = &d->view;
+	const struct bm *src = v->src ? v->src : &d->fb;
+	float sx = v->src ? v->sx : 1, sy = v->src ? v->sy : (float)d->scale;
+	int ox = v->src ? v->ox : 0, oy = v->src ? v->oy : 0;
+	int X0, X1, Y0, Y1, X, Y;
+	struct smol2d_rect sr;
 
-	/* doubling happens RAM to RAM; only the result crosses the bus */
-	if (d->scale > 1)
-		for (y = r->y; y < r->y + r->h; y++)
-			for (k = 0; k < d->scale; k++)
-				memcpy(p->phys.px + (size_t)(y * d->scale + k) * p->phys.stride + r->x,
-				       d->fb.px + (size_t)y * d->fb.stride + r->x, (size_t)r->w);
+	if (v->gen != p->gen) {
+		/* a new view: the border is the screen's colour 0 */
+		for (Y = 0; Y < p->phys.h; Y++)
+			memset(p->phys.px + (size_t)Y * p->phys.stride, 0, (size_t)p->phys.w);
+		p->gen = v->gen;
+		sr.x = 0;
+		sr.y = 0;
+		sr.w = (unsigned int)p->phys.w;
+		sr.h = (unsigned int)p->phys.h;
+		smol2d_tex_touch(p->cntx, smol2d_getbackbuffer(p->cntx), &sr);
+	}
+	X0 = ox + (int)(r->x * sx);
+	X1 = ox + (int)((r->x + r->w) * sx + 0.999f);
+	Y0 = oy + (int)(r->y * sy);
+	Y1 = oy + (int)((r->y + r->h) * sy + 0.999f);
+	if (X0 < 0) X0 = 0;
+	if (Y0 < 0) Y0 = 0;
+	if (X1 > p->phys.w) X1 = p->phys.w;
+	if (Y1 > p->phys.h) Y1 = p->phys.h;
+	if (X0 >= X1 || Y0 >= Y1)
+		return;
+	for (Y = Y0; Y < Y1; Y++) {
+		int y = (int)((Y - oy) / sy);
+		const uint8_t *s;
+		uint8_t *o = p->phys.px + (size_t)Y * p->phys.stride;
+
+		if (y < 0 || y >= src->h)
+			continue;
+		s = src->px + (size_t)y * src->stride;
+		if (s == o)
+			continue;		/* the screen is the backbuffer itself */
+		if (sx == 1.0f) {
+			int x0 = X0 - ox, n = X1 - X0;
+
+			if (x0 + n > src->w)
+				n = src->w - x0;
+			if (n > 0)
+				memcpy(o + X0, s + x0, (size_t)n);
+		} else {
+			for (X = X0; X < X1; X++) {
+				int x = (int)((X - ox) / sx);
+
+				if (x >= 0 && x < src->w)
+					o[X] = s[x];
+			}
+		}
+	}
+	sr.x = X0;
+	sr.y = Y0;
+	sr.w = (unsigned int)(X1 - X0);
+	sr.h = (unsigned int)(Y1 - Y0);
 	smol2d_tex_touch(p->cntx, smol2d_getbackbuffer(p->cntx), &sr);
 }
 

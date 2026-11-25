@@ -19,6 +19,8 @@ static int file_open(struct disp *d, const char *mode, const char *size)
 		d->scale = h / sh;
 		h = sh;
 	}
+	d->mw = w;
+	d->mh = h * d->scale;
 	if (bm_alloc(&d->fb, w, h))
 		return -1;
 	snprintf(d->desc, sizeof(d->desc), "memory, %dx%d, rows x%d", w, h, d->scale);

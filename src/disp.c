@@ -105,19 +105,59 @@ void disp_detach(struct disp *d, struct win *w)
 		d->ops->detach(d, w);
 }
 
+void disp_set_view(struct disp *d, struct bm *src, int w, int h, float sx, float sy, int ox, int oy)
+{
+	struct disp_view *v = &d->view;
+
+	if (v->src == src && v->w == w && v->h == h && v->sx == sx && v->sy == sy &&
+	    v->ox == ox && v->oy == oy)
+		return;
+	v->src = src;
+	v->w = w;
+	v->h = h;
+	v->sx = sx;
+	v->sy = sy;
+	v->ox = ox;
+	v->oy = oy;
+	v->gen++;
+}
+
+int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y)
+{
+	const struct disp_view *v = &d->view;
+	float fx, fy;
+
+	if (!v->src || v->sx <= 0 || v->sy <= 0)
+		return 0;
+	fx = (X - v->ox) / v->sx;
+	fy = (Y - v->oy) / v->sy;
+	if (fx < 0 || fy < 0)
+		return 0;
+	*x = (int)fx;
+	*y = (int)fy;
+	return *x < v->w && *y < v->h;
+}
+
+/* the screen as the display shows it, from the view's composition in RAM */
 int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char *path)
 {
 	FILE *f = fopen(path, "wb");
-	int x, y;
+	const struct bm *src = d->view.src ? d->view.src : &d->fb;
+	int x, y, W = d->mw ? d->mw : d->fb.w, H = d->mh ? d->mh : d->fb.h * d->scale;
 
 	if (!f)
 		return -errno;
-	fprintf(f, "P6\n%d %d\n255\n", d->fb.w, d->fb.h * d->scale);
-	for (y = 0; y < d->fb.h * d->scale; y++) {
+	fprintf(f, "P6\n%d %d\n255\n", W, H);
+	for (y = 0; y < H; y++) {
 		uint8_t row[3 * 2048];
 
-		for (x = 0; x < d->fb.w && x < 2048; x++)
-			memcpy(row + 3 * x, pal[d->fb.px[(y / d->scale) * d->fb.stride + x]], 3);
+		for (x = 0; x < W && x < 2048; x++) {
+			int sx, sy, pen = 0;
+
+			if (disp_view_map(d, x, y, &sx, &sy))
+				pen = src->px[(size_t)sy * src->stride + sx];
+			memcpy(row + 3 * x, pal[pen], 3);
+		}
 		fwrite(row, 3, (size_t)x, f);
 	}
 	fclose(f);

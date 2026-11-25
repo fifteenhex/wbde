@@ -36,6 +36,15 @@ enum wbp_type {
 	WBP_OBTAIN_PEN,		/* uint8_t rgb[3] -> WBP_PEN */
 	WBP_GET_FONT,		/* -> WBP_FONT */
 	WBP_ATTACH,		/* wbp_attach + a dma-buf fd (none: detach) -> WBP_ATTACHED */
+	/* screens of the client's own (see "Screens" in doc/client-protocol.md);
+	   `win` carries the screen id */
+	WBP_OPEN_SCREEN,	/* wbp_newscreen -> WBP_SCREEN_OPENED (+fd), win = the id */
+	WBP_SCREEN_CLOSE,	/* the screen and every window on it go */
+	WBP_SCREEN_DAMAGE,	/* wbp_rect: the client drew there (screen coords) */
+	WBP_SCREEN_PALETTE,	/* wbp_palette + count * 3 bytes */
+	WBP_SCREEN_TO_FRONT,
+	WBP_SCREEN_TO_BACK,
+	WBP_SCREEN_TITLE,	/* int32_t showtitle (-1: unchanged), then the title */
 
 	/* server to client */
 	WBP_SCREEN = 64,	/* wbp_screen */
@@ -45,6 +54,7 @@ enum wbp_type {
 	WBP_FONT,		/* wbp_font, then glyphs, then chardata */
 	WBP_ERROR,		/* int32_t -errno for the request with this serial */
 	WBP_ATTACHED,		/* (empty) the window shows the attached buffer */
+	WBP_SCREEN_OPENED,	/* wbp_screenbuf, with the screen buffer's fd */
 };
 
 struct wbp_hdr {
@@ -98,6 +108,40 @@ struct wbp_open {
 	uint32_t flags;			/* WBP_WF_* */
 	uint32_t idcmp;			/* IDCMP_* classes the client wants */
 	char title[80];
+	/* added for screens: a message without it (a version 1 client's) is
+	   on Workbench */
+	uint32_t screen;		/* 0 Workbench, else the client's screen id */
+};
+#define WBP_OPEN_V1_SIZE	(sizeof(struct wbp_open) - sizeof(uint32_t))
+
+/*
+ * A screen of the client's own: its size and depth, its palette and
+ * DrawInfo pens, and how the display should scale it (display pixels per
+ * screen pixel, as num/den: the client knows the Amiga display mode, and
+ * wbde only fits the result to the monitor).  The screen's own pixels
+ * (what its RastPort draws, under the windows) are a buffer of pens like
+ * a window's.  Windows open on it with wbp_open.screen.
+ */
+#define WBP_SF_SHOWTITLE	0x0001	/* the title bar in front of backdrop windows */
+
+struct wbp_newscreen {
+	uint16_t width, height, depth;
+	uint16_t flags;			/* WBP_SF_* */
+	uint16_t sx_num, sx_den, sy_num, sy_den;
+	uint8_t pens[16];		/* WBP_NUMPENS used */
+	char title[80];
+	uint8_t palette[256][3];
+};
+
+struct wbp_screenbuf {
+	uint16_t width, height, stride;
+	uint16_t barheight;		/* the title bar wbde draws */
+	uint16_t wbortop, wborleft, wborright, wborbottom;
+	uint32_t size;			/* bytes to mmap */
+};
+
+struct wbp_palette {
+	uint16_t first, count;		/* then count * 3 bytes, r g b */
 };
 
 struct wbp_window {

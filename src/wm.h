@@ -149,11 +149,27 @@ struct screen {
 	void (*palette_changed)(struct screen *s);
 	void (*flush_now)(void);	/* get what is drawn onto the display, now */
 	void (*bar_depth)(struct screen *s);	/* the screen depth gadget */
+	/*
+	 * Several screens, as Intuition has them: each its own size, depth,
+	 * palette and windows; the display shows the front one.  Screen pixel
+	 * (x, y) is at display pixel (ox + x * sx, oy + y * sy); the scale is
+	 * asked for by whoever opened the screen, the offset centres it (or,
+	 * for a screen bigger than the display, scrolls with the pointer).
+	 */
+	float sx, sy;
+	int ox, oy;
+	float fx, fy;			/* the pointer, with what is left over of a move */
+	struct screen *next;		/* the screen stack, front first */
+	struct win *barwin;		/* a client screen's title bar, a window of its own */
+	int showtitle;			/* the bar in front of backdrop windows */
+	int id;				/* a client screen's */
+	void *owner;
 };
 
 void screen_init(struct screen *s, struct bm *fb, int depth, struct font *font);
 void screen_set_title(struct screen *s, const char *title);
 void screen_draw_bar(struct screen *s);
+void screen_paint_bar(struct screen *s, struct rp *rp);
 void screen_damage(struct screen *s, const struct rect *r);
 void screen_damage_all(struct screen *s);
 /* composite every damaged rectangle into fb; calls out for each one */
@@ -163,6 +179,8 @@ void screen_compose(struct screen *s, struct bm *into, const struct rect *r, int
 /* the topmost live window covering all of r, or NULL: nothing below it shows */
 struct win *screen_cover(struct screen *s, const struct rect *r);
 void screen_set_pointer(struct screen *s, struct bm *ptr, int hx, int hy, int key);
+/* a client screen's title bar sits above the backdrop windows, or below them */
+void screen_place_bar(struct screen *s);
 void screen_add_overlay(struct screen *s, struct overlay *o);
 void screen_remove_overlay(struct screen *s, struct overlay *o);
 void screen_move_overlay(struct screen *s, struct overlay *o, int x, int y);

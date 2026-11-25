@@ -91,6 +91,10 @@ struct gpriv {
 	unsigned int nbatch;
 	int overflow;
 	int lw, lh;			/* the logical screen */
+	int mw, mh;			/* the display */
+	sgpu_tex pen0;			/* 1x1, pen 0: the border round a smaller screen */
+	unsigned int viewgen;		/* the view the border was drawn for */
+	int clear;			/* draw the border this flush */
 	int full;			/* WBDE_GPU_FULL: redraw everything every flush */
 	/* the hardware cursor */
 	int cursor;			/* it works and is in use */
@@ -103,6 +107,7 @@ struct gpriv {
 };
 
 static struct gpriv *G;		/* for the free hooks */
+static struct disp_view G_view;	/* this flush's view */
 
 static long us_between(const struct timespec *a, const struct timespec *b)
 {
@@ -265,8 +270,8 @@ static void cursor_update(struct gpriv *p, struct disp *d, struct screen *s)
 		p->cur_shown = 1;
 		p->cur_x = p->cur_y = -10000;
 	}
-	x = s->mx - s->ptr_hx;
-	y = (s->my - s->ptr_hy) * d->scale;
+	x = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx;
+	y = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * d->scale;
 	if (x != p->cur_x || y != p->cur_y) {
 		sgpu_cursor_move(&p->s, x, y);
 		p->cur_x = x;
@@ -427,6 +432,26 @@ static int outline_pieces(const struct screen *s, const struct rect *d, int nd, 
 	return n;
 }
 
+/* the whole display in screen coordinates: the border (pen 0) under everything */
+static void border(struct gpriv *p, const struct disp_view *v)
+{
+	static const float c[6][2] = { {0,0}, {1,0}, {1,1}, {0,0}, {1,1}, {0,1} };
+	float x0 = -v->ox / v->sx, y0 = -v->oy / v->sy;
+	float w = p->mw / v->sx, h = p->mh / v->sy;
+	int i;
+
+	batch_begin(p, PROG_PAL, &p->pen0, &p->pal, -1);
+	for (i = 0; i < 6 && p->nverts + 6 <= MAXQUADS * 6; i++) {
+		sgpu_vertex_2d *q = &p->verts[p->nverts++];
+
+		q->pos[0] = x0 + c[i][0] * w;
+		q->pos[1] = y0 + c[i][1] * h;
+		q->uv[0] = 0.5f;
+		q->uv[1] = 0.5f;
+	}
+	batch_end(p);
+}
+
 static void build(struct gpriv *p, struct screen *s, const struct rect *d, int nd)
 {
 	struct rect x[DAMAGE_MAX * 4];
@@ -434,6 +459,8 @@ static void build(struct gpriv *p, struct screen *s, const struct rect *d, int n
 
 	p->nverts = p->nbatch = 0;
 	p->overflow = 0;
+	if (p->clear)
+		border(p, &G_view);
 	layers(p, s, d, nd, &p->pal, 1);
 	if (s->outline_on && (nx = outline_pieces(s, d, nd, x)) > 0)
 		layers(p, s, x, nx, &p->xpal, 0);
@@ -446,7 +473,7 @@ static void build(struct gpriv *p, struct screen *s, const struct rect *d, int n
 /* the flush                                                           */
 /* ------------------------------------------------------------------ */
 
-static void draw(struct gpriv *p)
+static void draw(struct gpriv *p, const struct disp_view *v)
 {
 	sgpu_vbuf *vb = &p->vb[sgpu_update_slot(&p->s)];
 	float m[4][4];
@@ -455,7 +482,12 @@ static void draw(struct gpriv *p)
 
 	sgpu_update_begin(&p->s);
 	sgpu_vbuf_write(&p->s, vb, 0, p->verts, p->nverts);
-	sgpu_m_ortho_px(m, (float)p->lw, (float)p->lh);
+	/* screen pixels to the display through the view: (ox + x sx, oy + y sy) */
+	sgpu_m_ortho_px(m, (float)p->mw, (float)p->mh);
+	m[0][0] = 2.0f * v->sx / p->mw;
+	m[0][3] = 2.0f * v->ox / p->mw - 1.0f;
+	m[1][1] = -2.0f * v->sy / p->mh;
+	m[1][3] = 1.0f - 2.0f * v->oy / p->mh;
 	for (i = 0; i < p->nbatch; i++) {
 		const struct batch *b = &p->batch[i];
 
@@ -480,12 +512,23 @@ static void gpu_compose(struct disp *d, struct screen *s)
 	struct timespec t0, t1, t2, t3;
 	struct win *w;
 	struct overlay *o;
-	struct rect all = { 0, 0, p->lw, p->lh };
+	struct rect all = { 0, 0, s->w, s->h };
 	long area = 0;
 	int i;
 
 	if (sgpu_error(&p->s))
 		return;
+	G_view = d->view;
+	if (!G_view.src || G_view.sx <= 0) {
+		G_view.sx = 1;
+		G_view.sy = (float)d->scale;
+		G_view.ox = G_view.oy = 0;
+	}
+	if (d->view.gen != p->viewgen) {
+		p->viewgen = d->view.gen;
+		p->clear = 1;
+		screen_damage_all(s);
+	}
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	p->up_bytes = 0;
 	p->up_cmp = 0;
@@ -505,6 +548,7 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		xor_palette(p, s->xormask);
 	if (p->pal_changed) {
 		p->pal_changed = 0;
+		p->clear = 1;
 		screen_damage_all(s);
 	}
 	if (p->cursor) {
@@ -525,8 +569,9 @@ static void gpu_compose(struct disp *d, struct screen *s)
 	build(p, s, s->damage, s->ndamage);
 	if (p->overflow)		/* too many pieces: the whole screen, once a layer */
 		build(p, s, &all, 1);
+	p->clear = 0;
 	clock_gettime(CLOCK_MONOTONIC, &t2);
-	draw(p);
+	draw(p, &G_view);
 	clock_gettime(CLOCK_MONOTONIC, &t3);
 	s->ndamage = 0;
 	if (sgpu_error(&p->s))
@@ -563,12 +608,13 @@ static int in_ext(struct screen *s, int x, int y)
 static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 {
 	struct gpriv *p = d->priv;
-	struct rect all = { 0, 0, p->lw, p->lh };
+	struct rect all = { 0, 0, s->w, s->h };
+	struct bm *ref = d->view.src ? d->view.src : &d->fb;
 	unsigned int stride;
 	const uint32_t *px;
 	uint32_t *img;
 	long bad = 0, total = 0;
-	int W = (int)sgpu_width(&p->s), H = (int)sgpu_height(&p->s), x, y, shown = 0;
+	int W = (int)sgpu_width(&p->s), H = (int)sgpu_height(&p->s), x, y;
 	FILE *f;
 	struct timespec t0, t1;
 
@@ -581,14 +627,15 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 		memcpy(img + (size_t)y * W, px + (size_t)y * stride, (size_t)W * 4);
 	sgpu_readback_end(&p->s);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	/* the CPU's composition of the same screen, as the reference */
-	screen_compose(s, &d->fb, &all, !p->cursor);
-	for (y = 0; y < H && y / d->scale < p->lh; y++)
-		for (x = 0; x < W && x < p->lw; x++) {
-			uint32_t want = p->colours[d->fb.px[(size_t)(y / d->scale) * d->fb.stride + x]];
+	/* the CPU's composition of the same screen, through the same view, as the reference */
+	screen_compose(s, ref, &all, !p->cursor);
+	for (y = 0; y < H; y++)
+		for (x = 0; x < W; x++) {
+			int sx, sy, in = disp_view_map(d, x, y, &sx, &sy);
+			uint32_t want = p->colours[in ? ref->px[(size_t)sy * ref->stride + sx] : 0];
 			uint32_t got = img[(size_t)y * W + x] & 0xffffff;
 
-			if (in_ext(s, x, y / d->scale))
+			if (in && in_ext(s, sx, sy))
 				continue;
 			total++;
 			if (got != want && bad++ < 5)
@@ -601,19 +648,18 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 	/* the hardware cursor is not in the scan-out: paint it in for the eye */
 	if (p->cursor && s->ptr && !s->ptr_hidden) {
 		const struct bm *b = s->ptr;
+		int cx = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx;
+		int cy = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * d->scale;
 
 		for (y = 0; y < b->h * d->scale; y++)
 			for (x = 0; x < b->w; x++) {
-				int sx = s->mx - s->ptr_hx + x, sy = (s->my - s->ptr_hy) * d->scale + y;
+				int X = cx + x, Y = cy + y;
 				int pen = b->px[(y / d->scale) * b->stride + x];
 
-				if (pen != s->ptr_key && sx >= 0 && sy >= 0 && sx < W && sy < H) {
-					img[(size_t)sy * W + sx] = p->colours[pen];
-					shown = 1;
-				}
+				if (pen != s->ptr_key && X >= 0 && Y >= 0 && X < W && Y < H)
+					img[(size_t)Y * W + X] = p->colours[pen];
 			}
 	}
-	(void)shown;
 	f = fopen(path, "wb");
 	if (!f) {
 		free(img);
@@ -807,6 +853,8 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	}
 	mw = (int)sgpu_width(&p->s);
 	mh = (int)sgpu_height(&p->s);
+	p->mw = d->mw = mw;
+	p->mh = d->mh = mh;
 	d->scale = 1;
 	p->lw = mw;
 	p->lh = mh;
@@ -831,6 +879,14 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	sgpu_tex_create(&p->s, &p->xpal, 256, 1, SGPU_TEX_XRGB8);
 	sgpu_tex_filter(&p->pal, false, true);
 	sgpu_tex_filter(&p->xpal, false, true);
+	{
+		uint8_t zero = 0;
+
+		sgpu_tex_create(&p->s, &p->pen0, 1, 1, SGPU_TEX_R8);
+		sgpu_tex_write_rect(&p->s, &p->pen0, 0, 0, 1, 1, &zero, 1);
+		sgpu_tex_filter(&p->pen0, false, true);
+	}
+	p->clear = 1;
 	for (i = 0; i < SGPU_UPDATE_SLOTS; i++)
 		sgpu_vbuf_create_own(&p->s, &p->vb[i], &sgpu_layout_2d, NULL, MAXQUADS * 6);
 	p->xormask = -1;
