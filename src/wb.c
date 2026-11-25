@@ -207,12 +207,13 @@ static struct rect icon_bounds(struct wb *wb, const struct wbicon *ic)
 
 /* --- drawing --- */
 
-static void draw_icon(struct wb *wb, struct rp *rp, const struct wbicon *ic, int ox, int oy)
+static void draw_icon(struct wb *wb, struct rp *rp, struct wbicon *ic, int ox, int oy)
 {
 	const struct icon *i = &ic->ic;
 	int sel = ic->selected || ic->open;
 	int x = ic->x - ox, y = ic->y - oy;
 
+	ic->drawn = (ic->selected ? 1 : 0) | (ic->open ? 2 : 0);
 	/* the frame: filled with the background pen, raised, recessed when selected */
 	rp_fill(rp, x - ICON_FX, y - ICON_FY, i->w + 2 * ICON_FX, i->h + 2 * ICON_FY,
 		PEN(wb, P_BACKGROUND));
@@ -449,6 +450,7 @@ static void drawer_scan(struct wb *wb, struct drawer *dr)
 
 static void redraw_drawer(struct wb *wb, struct drawer *d);
 static void redraw_root(struct wb *wb);
+static void refresh_changed(struct wb *wb, struct iconview *v);
 
 static void deselect_view(struct iconview *v, int *changed)
 {
@@ -469,14 +471,14 @@ static void deselect_all(struct wb *wb, struct iconview *except)
 	if (&wb->root != except) {
 		deselect_view(&wb->root, &ch);
 		if (ch)
-			redraw_root(wb);
+			refresh_changed(wb, &wb->root);
 	}
 	for (d = wb->drawers; d; d = d->next) {
 		ch = 0;
 		if (&d->view != except)
 			deselect_view(&d->view, &ch);
 		if (ch)
-			redraw_drawer(wb, d);
+			refresh_changed(wb, &d->view);
 	}
 }
 
@@ -548,6 +550,50 @@ static const struct win_ops root_ops = {
 static void redraw_root(struct wb *wb)
 {
 	win_refresh(wb->s, wb->backdrop);
+}
+
+/*
+ * Redraw only the icons of v that look different from when they were last
+ * drawn (selected, or their drawer opened or closed), each clipped to its
+ * own bounds: repainting the whole backdrop or drawer for a selection
+ * change would cost that whole bitmap compared on a GPU display, and that
+ * whole area composited on the software one.
+ */
+static void refresh_changed(struct wb *wb, struct iconview *v)
+{
+	struct win *w = NULL;
+	struct drawer *d;
+	int i, ox = 0, oy = 0;
+
+	if (v == &wb->root) {
+		w = wb->backdrop;
+	} else {
+		for (d = wb->drawers; d; d = d->next)
+			if (&d->view == v)
+				break;
+		if (!d)
+			return;
+		if (d->byname) {		/* a text list: its rows move about */
+			redraw_drawer(wb, d);
+			return;
+		}
+		w = d->win;
+		ox = d->ox;
+		oy = d->oy;
+	}
+	if (!w)
+		return;
+	for (i = 0; i < v->n; i++) {
+		struct wbicon *ic = &v->icons[i];
+		struct rect b;
+
+		if (ic->drawn == ((ic->selected ? 1 : 0) | (ic->open ? 2 : 0)))
+			continue;
+		b = icon_bounds(wb, ic);
+		b.x -= ox;
+		b.y -= oy;
+		win_refresh_rect(wb->s, w, &b);
+	}
 }
 
 static void update_scrollers(struct wb *wb, struct drawer *d)
@@ -652,15 +698,7 @@ static void drawer_free(struct wb *wb, struct drawer *d)
 			if (d->opener_view->icons[i].path &&
 			    !strcmp(d->opener_view->icons[i].path, d->path)) {
 				d->opener_view->icons[i].open = 0;
-				if (d->opener_view == &wb->root) {
-					redraw_root(wb);
-				} else {
-					struct drawer *o;
-
-					for (o = wb->drawers; o; o = o->next)
-						if (&o->view == d->opener_view)
-							redraw_drawer(wb, o);
-				}
+				refresh_changed(wb, d->opener_view);
 			}
 	}
 	view_free(&d->view);
@@ -943,15 +981,7 @@ static void open_icon(struct wb *wb, struct iconview *v, struct wbicon *ic)
 		d = open_drawer(wb, ic->path, ic->label, &ic->ic, v);
 		if (d) {
 			ic->open = 1;
-			if (v == &wb->root) {
-				redraw_root(wb);
-			} else {
-				struct drawer *o;
-
-				for (o = wb->drawers; o; o = o->next)
-					if (&o->view == v)
-						redraw_drawer(wb, o);
-			}
+			refresh_changed(wb, v);
 		}
 		return;
 	}
@@ -1043,7 +1073,7 @@ static void view_button(struct wb *wb, struct win *w, struct iconview *v, int x,
 				}
 			}
 			if (ch)
-				win_refresh(wb->s, w);
+				refresh_changed(wb, v);
 		}
 		if (wb->dragging) {
 			screen_remove_overlay(wb->s, &wb->dragov);
@@ -1093,7 +1123,7 @@ static void view_button(struct wb *wb, struct win *w, struct iconview *v, int x,
 		if (!(qual & QUAL_SHIFT))
 			deselect_all(wb, NULL);
 		ic->selected = 1;
-		win_refresh(wb->s, w);
+		refresh_changed(wb, v);
 	}
 	/* get ready to drag the selection */
 	wb->dragging = 1;

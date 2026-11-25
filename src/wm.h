@@ -178,6 +178,8 @@ void win_move_size(struct screen *s, struct win *w, const struct rect *r);
 /* redraw content (and frame) into the backing store and damage it */
 void win_refresh(struct screen *s, struct win *w);
 void win_refresh_frame(struct screen *s, struct win *w);
+/* redraw only r of the content (inner coordinates), and damage only that */
+void win_refresh_rect(struct screen *s, struct win *w, const struct rect *r);
 void win_inner(const struct win *w, struct rect *r);	/* in window coords */
 void win_set_scroll(struct screen *s, struct win *w, int vtotal, int vvis, int vtop,
 		    int htotal, int hvis, int htop);

@@ -18,6 +18,7 @@ struct wbicon {
 	int labelw;
 	int selected;
 	int open;		/* its drawer is open: drawn ghosted, as WB does */
+	int drawn;		/* selected | open << 1, as last drawn */
 };
 
 struct iconview {

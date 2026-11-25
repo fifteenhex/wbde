@@ -384,8 +384,41 @@ static void damage_win(struct screen *s, struct win *w)
 
 void win_refresh_frame(struct screen *s, struct win *w)
 {
+	struct rect b[4];
+	int i;
+
+	/* a borderless window has no frame to redraw; for the rest, only the
+	   four border strips changed */
+	if (w->flags & WF_BORDERLESS)
+		return;
 	draw_frame(s, w);
-	damage_win(s, w);
+	b[0] = rect_make(w->r.x, w->r.y, w->r.w, w->bt);
+	b[1] = rect_make(w->r.x, w->r.y + w->r.h - w->bb, w->r.w, w->bb);
+	b[2] = rect_make(w->r.x, w->r.y + w->bt, w->bl, w->r.h - w->bt - w->bb);
+	b[3] = rect_make(w->r.x + w->r.w - w->br, w->r.y + w->bt, w->br, w->r.h - w->bt - w->bb);
+	for (i = 0; i < 4; i++)
+		screen_damage(s, &b[i]);
+}
+
+void win_refresh_rect(struct screen *s, struct win *w, const struct rect *r)
+{
+	struct rp rp;
+	struct rect in, c, d;
+
+	win_inner(w, &in);
+	c = rect_make(in.x + r->x, in.y + r->y, r->w, r->h);
+	if (!rect_intersect(&c, &c, &in))
+		return;
+	rp_init(&rp, &w->bm);
+	rp_clip(&rp, &c);
+	rp.ox = in.x;
+	rp.oy = in.y;
+	if (w->ops && w->ops->draw)
+		w->ops->draw(w, &rp);
+	else
+		rp_fill(&rp, 0, 0, in.w, in.h, PEN(s, P_BACKGROUND));
+	d = rect_make(w->r.x + c.x, w->r.y + c.y, c.w, c.h);
+	screen_damage(s, &d);
 }
 
 void win_refresh(struct screen *s, struct win *w)
