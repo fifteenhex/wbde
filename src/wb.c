@@ -1612,7 +1612,7 @@ static void execute_done(struct wb *wb, int button, const char *text)
 static void quit_done(struct wb *wb, int button, const char *text)
 {
 	(void)text;
-	if (button == 0)
+	if (button == 0 && !getenv("WBDE_NOQUIT"))	/* NOQUIT: for fuzzing */
 		wb->quit = 1;
 }
 
