@@ -18,11 +18,13 @@
 #include "font.h"
 #include "menu.h"
 #include "prefs.h"
+#include "wb.h"
 #include "wm.h"
 
 static struct disp D;
 static struct screen S;
 static struct wbenv ENV;
+static struct wb W;
 static volatile sig_atomic_t got_chld, got_quit, got_shot;
 static uint64_t vclock;		/* scripted runs keep their own time */
 static int scripted;
@@ -84,6 +86,7 @@ static void cb_button(void *arg, int button, int down)
 	struct screen *s = arg;
 	uint64_t now = now_ms();
 
+	W.now = now;
 	if (button == 2) {
 		if (down && !menu_is_open() && !wm_busy(s)) {
 			struct win *w = win_at(s, s->mx, s->my);
@@ -141,11 +144,13 @@ static int run_script(const char *path)
 		perror(path);
 		return -1;
 	}
-	while (fgets(line, sizeof(line), f)) {
+	while (fgets(line, sizeof(line), f) && !W.quit) {
 		int a, b, c, d;
 		char arg[400];
 
 		vclock += 20;
+		W.now = vclock;
+		wb_tick(&W, vclock);
 		if (sscanf(line, "move %d %d", &a, &b) == 2) {
 			cb_motion(&S, a - S.mx, b - S.my);
 		} else if (sscanf(line, "down %d", &a) == 1) {
@@ -161,6 +166,7 @@ static int run_script(const char *path)
 			cb_button(&S, 1, 1);
 			cb_button(&S, 1, 0);
 			vclock += 100;
+			W.now = vclock;
 			cb_button(&S, 1, 1);
 			cb_button(&S, 1, 0);
 		} else if (sscanf(line, "menu %d %d %d %d", &a, &b, &c, &d) == 4) {
@@ -203,7 +209,7 @@ static int run_script(const char *path)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--rom FILE]\n"
+		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--conf FILE] [--rom FILE]\n"
 		"            [--script FILE]\n");
 }
 
@@ -213,25 +219,29 @@ int main(int argc, char **argv)
 		{ "mode", required_argument, NULL, 'm' },
 		{ "size", required_argument, NULL, 'z' },
 		{ "sys", required_argument, NULL, 's' },
+		{ "conf", required_argument, NULL, 'c' },
 		{ "rom", required_argument, NULL, 'r' },
 		{ "script", required_argument, NULL, 'S' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
-	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *script = NULL;
+	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *conf = NULL, *script = NULL;
 	struct sigaction sa;
 	int o;
 
-	while ((o = getopt_long(argc, argv, "m:z:s:r:S:h", opts, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:h", opts, NULL)) != -1) {
 		switch (o) {
 		case 'm': mode = optarg; break;
 		case 'z': size = optarg; break;
 		case 's': sys = optarg; break;
+		case 'c': conf = optarg; break;
 		case 'r': setenv("WBDE_ROM", optarg, 1); break;
 		case 'S': script = optarg; break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
+	if (!conf && access("/mnt/lnx/wbde/wbde.conf", R_OK) == 0)
+		conf = "/mnt/lnx/wbde/wbde.conf";
 	scripted = script != NULL;
 
 	if (env_load(&ENV, sys)) {
@@ -255,6 +265,10 @@ int main(int argc, char **argv)
 	S.mx = S.w / 2;
 	S.my = S.h / 2;
 	screen_set_pointer(&S, &ENV.pointer, ENV.ptr_hx, ENV.ptr_hy, 0);
+	if (wb_init(&W, &S, &ENV, conf)) {
+		disp_close(&D);
+		return 1;
+	}
 	ENV.paldirty = 1;
 	screen_damage_all(&S);
 	flush();
@@ -265,7 +279,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	while (!got_quit) {
+	while (!W.quit && !got_quit) {
 		struct pollfd fds[32];
 		int nc, timeout;
 		uint64_t now;
@@ -275,12 +289,14 @@ int main(int argc, char **argv)
 		if (poll(fds, (nfds_t)nc, timeout) < 0 && errno != EINTR)
 			break;
 		now = now_ms();
+		W.now = now;
 		con_service(&S, fds, nc);
 		if (got_chld) {
 			got_chld = 0;
 			con_reap(&S);
 		}
 		wm_tick(&S, now);
+		wb_tick(&W, now);
 		flush();
 		if (got_shot) {
 			got_shot = 0;

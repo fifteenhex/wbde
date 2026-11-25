@@ -41,8 +41,8 @@ inc = include_directories('src')
 
 readers = files('src/rom.c', 'src/font.c', 'src/gfx.c', 'src/iff.c', 'src/icon.c',
                 'src/hunk.c')
-core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/con.c',
-                       'src/main.c')
+core = readers + files('src/prefs.c', 'src/wm.c', 'src/menu.c', 'src/wb.c',
+                       'src/con.c', 'src/main.c')
 
 # One display, picked at build time: smol2d on DRM, or memory only
 if get_option('soft')
