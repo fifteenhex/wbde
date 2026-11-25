@@ -69,6 +69,7 @@ struct wb {
 	uint64_t now;
 	char lastmsg[160];
 	struct menustrip strip;
+	int leftout_x;		/* where left-out icons without a spot go */
 };
 
 int wb_init(struct wb *wb, struct screen *s, struct wbenv *env, const char *conf);

@@ -1732,13 +1732,33 @@ static void add_left_out(struct wb *wb, const struct rect *in)
 			wb->root.n--;	/* not itself */
 			taken = view_hit(wb, &wb->root, ic->ic.x + ic->ic.w / 2, ic->ic.y + ic->ic.h / 2) != NULL;
 			wb->root.n++;
-			if (ic->ic.x != ICON_NOPOS && ic->ic.x < in->w - 40 && ic->ic.y < in->h - 20 && !taken) {
+			if (ic->ic.x != ICON_NOPOS && ic->ic.x >= wb->leftout_x &&
+			    ic->ic.x < in->w - 40 && ic->ic.y < in->h - 20 && !taken) {
 				ic->x = ic->ic.x;
 				ic->y = ic->ic.y;
 			} else {
-				ic->x = 8;
+				/* down the left edge, past anything already there */
+				struct rect b;
+				int i, clash;
+
+				/* in a column right of the disks, label and all */
+				ic->x = 0;
 				ic->y = auto_y;
-				auto_y += icon_h(wb, ic) + 8;
+				b = icon_bounds(wb, ic);
+				ic->x = wb->leftout_x - b.x;
+				do {
+					clash = 0;
+					b = icon_bounds(wb, ic);
+					for (i = 0; i < wb->root.n - 1; i++) {
+						struct rect o = icon_bounds(wb, &wb->root.icons[i]), x;
+
+						if (rect_intersect(&x, &b, &o)) {
+							ic->y = o.y + o.h + 6;
+							clash = 1;
+						}
+					}
+				} while (clash && ic->y < in->h);
+				auto_y = ic->y + icon_h(wb, ic) + 8;
 			}
 		}
 		fclose(f);
@@ -1766,18 +1786,39 @@ static void build_root(struct wb *wb)
 		if (icon_w(ic) > colw)
 			colw = icon_w(ic);
 	}
-	/* disks down the right hand side, as Workbench puts them */
+	/*
+	 * Disks down the left hand side, Ram Disk first, further columns to
+	 * the right when one fills up.
+	 */
 	win_inner(wb->backdrop, &in);
-	for (i = 0; i < wb->nvols && i < wb->root.n; i++) {
-		struct wbicon *ic = &wb->root.icons[i];
+	{
+		int x0 = 8, k, ram = -1, n = wb->nvols < wb->root.n ? wb->nvols : wb->root.n;
 
-		ic->x = in.w - 8 - colw / 2 - ic->ic.w / 2;
-		ic->y = y;
-		y += icon_h(wb, ic) + 8;
-		if (y > in.h - 40) {
-			y = 6;
-			in.w -= colw + 12;
+		for (i = 0; i < n; i++)
+			if (!strcmp(wb->vols[i].name, "Ram Disk"))
+				ram = i;
+		for (k = -1; k < n; k++) {
+			struct wbicon *ic;
+
+			i = k < 0 ? ram : k;
+			if (i < 0 || (k >= 0 && i == ram))
+				continue;
+			ic = &wb->root.icons[i];
+			ic->x = x0 + colw / 2 - ic->ic.w / 2;
+			ic->y = y;
+			y += icon_h(wb, ic) + 8;
+			if (y > in.h - 40) {
+				y = 6;
+				x0 += colw + 12;
+			}
 		}
+	}
+	/* left out icons go right of the disk column(s) */
+	wb->leftout_x = 8;
+	for (i = 0; i < wb->nvols && i < wb->root.n; i++) {
+		struct rect b = icon_bounds(wb, &wb->root.icons[i]);
+		if (b.x + b.w + 16 > wb->leftout_x)
+			wb->leftout_x = b.x + b.w + 16;
 	}
 	win_inner(wb->backdrop, &in);
 	add_left_out(wb, &in);
