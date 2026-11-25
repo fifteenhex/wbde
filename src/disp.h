@@ -69,6 +69,16 @@ struct disp_view {
 	float sx, sy;
 	int ox, oy;
 	unsigned int gen;	/* bumped on every change */
+	/*
+	 * A screen behind the front one shows above it when the front one
+	 * starts lower down (its top_edge): display rows above oy are that
+	 * screen's, through its own view.
+	 */
+	struct screen *back;
+	struct bm *bsrc;
+	int bw, bh;
+	float bsx, bsy;
+	int box, boy;
 };
 
 struct disp {
@@ -117,7 +127,11 @@ int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char 
 
 /* show src (a w x h screen) at that scale and offset */
 void disp_set_view(struct disp *d, struct bm *src, int w, int h, float sx, float sy, int ox, int oy);
-/* display pixel to screen pixel under the view; 0 outside it */
+/* the screen behind that shows above the front one (NULL: none) */
+void disp_set_back(struct disp *d, struct screen *back, struct bm *src, int w, int h, float sx,
+		   float sy, int ox, int oy);
+/* display pixel to screen pixel under the view: 1 the front screen's,
+   2 the screen behind's, 0 neither */
 int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y);
 
 #endif

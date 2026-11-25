@@ -134,7 +134,11 @@ struct wbp_newscreen {
 	uint8_t pens[16];		/* WBP_NUMPENS used */
 	char title[80];
 	uint8_t palette[256][3];
+	/* added: a message without it is a screen at the top */
+	uint16_t top;			/* rows down: the screen behind shows above */
+	uint16_t pad;
 };
+#define WBP_NEWSCREEN_V1_SIZE	(sizeof(struct wbp_newscreen) - 4)
 
 struct wbp_screenbuf {
 	uint16_t width, height, stride;

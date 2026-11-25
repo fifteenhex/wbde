@@ -174,6 +174,9 @@ struct screen {
 	void (*root_motion)(struct screen *s, int x, int y);
 	void (*root_key)(struct screen *s, const struct keyev *k);
 	int root_rmbtrap;		/* the right button is the root's, not menus */
+	int top_edge;			/* rows down from the top of the screen behind,
+					   which shows above it (an Amiga screen pulled
+					   down, or opened low: a panel under another) */
 };
 
 void screen_init(struct screen *s, struct bm *fb, int depth, struct font *font);

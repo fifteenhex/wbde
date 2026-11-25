@@ -693,6 +693,8 @@ static void do_open_screen(struct client *c, const struct wbp_hdr *h, const stru
 	cs->s.owner = cs;
 	cs->s.bar_depth = cs_bar_depth;
 	cs->s.showtitle = (n->flags & WBP_SF_SHOWTITLE) != 0;
+	if (h->len >= sizeof(struct wbp_newscreen) && n->top < 4096)
+		cs->s.top_edge = n->top;
 	cs->s.flush_now = S->flush_now;
 	cs->s.root_button = root_button;
 	cs->s.root_motion = root_motion;
@@ -722,6 +724,8 @@ static void do_open_screen(struct client *c, const struct wbp_hdr *h, const stru
 	cs->next = c->screens;
 	c->screens = cs;
 	screens_add(&cs->s);
+	fprintf(stderr, "wbde: screen %u for %s: %dx%dx%d at %gx, top %d\n", cs->id, c->name, w, ht,
+		n->depth, cs->s.sx, cs->s.top_edge);
 
 	memset(&m, 0, sizeof(m));
 	m.width = (uint16_t)w;
@@ -941,7 +945,7 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 	}
 	switch (h->type) {
 	case WBP_OPEN_SCREEN:
-		if (h->len >= sizeof(struct wbp_newscreen))
+		if (h->len >= WBP_NEWSCREEN_V1_SIZE)
 			do_open_screen(c, h, (const struct wbp_newscreen *)p);
 		else
 			send_error(c, h, EINVAL);

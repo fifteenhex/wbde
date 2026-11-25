@@ -209,6 +209,10 @@ them.
   for Workbench.  Outside the screen the display is black.
   amigafmt asks for whole numbers from the ModeID: low resolution 2
   across, high 1, super-high 1/2; 2 down unless interlaced.
+- `wbp_newscreen.top` opens the screen lower down: the screen behind it
+  shows above it, with its own palette, and the new screen takes the
+  scale and position of the one behind.  Only the GPU display shows
+  this; the software display shows the front screen alone.
 - The screen's own pixels (what its RastPort draws, under every window)
   are a buffer of pens like a window's (`wbp_screenbuf` has the size,
   stride and bytes to map), and `WBP_SCREEN_DAMAGE` says where it

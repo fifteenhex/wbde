@@ -30,6 +30,8 @@
 static struct disp D;
 static struct screen S;			/* the Workbench screen */
 static struct screen *front = &S, *stack = &S;	/* the screen stack, front first */
+/* the screen under the pointer: the front one, or the one behind above it */
+static struct screen *pscreen = &S;
 /* display pixels a mouse count moves: on a big monitor the pointer
    crosses it as fast as it crosses a 640 pixel one */
 static float motion_gain = 1;
@@ -90,9 +92,36 @@ static const struct menustrip *strip_for(struct screen *s)
 /* ---- the screen stack ---- */
 
 /* where the front screen sits on the display: centred, or scrolled to the pointer */
+static void layout(struct screen *s);
+
+/* the screen behind that shows above the front one, if it starts lower */
+static struct screen *back_of(struct screen *s)
+{
+	return s->top_edge > 0 ? s->next : NULL;
+}
+
 static void view_update(void)
 {
-	struct screen *s = front;
+	struct screen *s = front, *b = back_of(s);
+
+	if (b) {
+		/* the panel takes the scale and position of the screen behind */
+		layout(b);
+		s->sx = b->sx;
+		s->sy = b->sy;
+		s->ox = b->ox;
+		s->oy = b->oy + (int)(s->top_edge * b->sy);
+		disp_set_back(&D, b, b->fb, b->w, b->h, b->sx, b->sy, b->ox, b->oy);
+	} else {
+		layout(s);
+		disp_set_back(&D, NULL, NULL, 0, 0, 0, 0, 0, 0);
+	}
+	disp_set_view(&D, s->fb, s->w, s->h, s->sx, s->sy, s->ox, s->oy);
+}
+
+/* where s sits on the display: centred, or scrolled to its pointer */
+static void layout(struct screen *s)
+{
 	int vw = (int)(s->w * s->sx + 0.5f), vh = (int)(s->h * s->sy + 0.5f);
 
 	if (vw <= D.mw)
@@ -123,7 +152,6 @@ static void view_update(void)
 		if (s->oy < D.mh - vh)
 			s->oy = D.mh - vh;
 	}
-	disp_set_view(&D, s->fb, s->w, s->h, s->sx, s->sy, s->ox, s->oy);
 }
 
 /* the largest whole scale at which a w x h screen fits the display */
@@ -145,8 +173,12 @@ static void set_front(struct screen *n)
 	struct screen *old = front;
 	float X, Y;
 
-	if (n == old)
+	pscreen = n;
+	if (n == old) {
+		view_update();          /* the screen behind it may have changed */
+		screen_damage_all(n);
 		return;
+	}
 	if (menu_is_open())
 		menu_close(old);
 	/* the pointer stays where it is on the display */
@@ -193,6 +225,8 @@ void screens_remove(struct screen *s)
 			break;
 		}
 	s->next = NULL;
+	if (pscreen == s)
+		pscreen = stack;
 	if (front == s) {
 		front = stack;		/* without the pointer mapping: s is going */
 		front->fx = (float)front->mx;
@@ -272,15 +306,30 @@ static void wb_bar_depth(struct screen *s)
 
 /* ---- input ---- */
 
+
 static void pointer_moved(struct screen *s, uint64_t now)
 {
 	int ox = s->ox, oy = s->oy;
+	struct screen *b = back_of(s);
+	float top = b ? -(float)s->top_edge : 0;
 
 	if (s->fx < 0) s->fx = 0;
-	if (s->fy < 0) s->fy = 0;
+	if (s->fy < top) s->fy = top;
 	if (s->fx > s->w - 1) s->fx = (float)(s->w - 1);
 	if (s->fy > s->h - 1) s->fy = (float)(s->h - 1);
-	wm_motion(s, (int)s->fx, (int)s->fy, now);
+	if (b && s->fy < 0 && !wm_busy(s) && !menu_is_open()) {
+		/* over the screen behind: its pixels, its windows */
+		pscreen = b;
+		wm_motion(b, (int)s->fx, (int)(s->fy + s->top_edge), now);
+		return;
+	}
+	if (!wm_busy(pscreen) || pscreen == s)
+		pscreen = s;
+	if (pscreen != s) {             /* a drag that began behind */
+		wm_motion(pscreen, (int)s->fx, (int)(s->fy + s->top_edge), now);
+		return;
+	}
+	wm_motion(s, (int)s->fx, (int)(s->fy < 0 ? 0 : s->fy), now);
 	view_update();
 	if (s->ox != ox || s->oy != oy)
 		screen_damage_all(s);		/* it scrolled */
@@ -323,7 +372,7 @@ unsigned int screens_buttons(void)
 
 static void cb_button(void *arg, int button, int down)
 {
-	struct screen *s = front;
+	struct screen *s = pscreen;
 	unsigned int bit = button == 1 ? 0x4000 : button == 2 ? 0x2000 : 0x1000;
 
 	buttons = down ? buttons | bit : buttons & ~bit;
@@ -400,7 +449,7 @@ static int kbd_mouse(struct screen *s, const struct keyev *k)
 
 static void cb_key(void *arg, const struct keyev *k)
 {
-	struct screen *s = front;
+	struct screen *s = pscreen;
 
 	(void)arg;
 	if (kbd_mouse(s, k))
@@ -445,6 +494,8 @@ static void flush(void)
 			fprintf(stderr, "wbde: %s\n", D.timing);
 		return;
 	}
+	if (D.view.back && D.view.back->ndamage)
+		screen_flush(D.view.back, NULL, NULL);  /* for screenshots; not shown */
 	if (front->ndamage) {
 		struct timespec t0, t1, t2;
 		long area = 0;

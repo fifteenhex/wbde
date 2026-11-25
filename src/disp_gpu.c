@@ -79,8 +79,8 @@ struct gpriv {
 	sgpu_ctx s;
 	sgpu_prog prog[2];
 	int u_tex, u_pal, u_key;
-	sgpu_tex pal, xpal;
-	uint32_t colours[256];
+	sgpu_tex pal, xpal, pal2;	/* pal2: the screen behind's */
+	uint32_t colours[256], colours2[256];
 	int xormask;			/* what xpal was built for; -1 none yet */
 	int pal_changed;		/* everything must be redrawn */
 	unsigned int palgen;		/* bumped on every palette change */
@@ -492,7 +492,7 @@ static void build(struct gpriv *p, struct screen *s, const struct rect *d, int n
 
 	p->nverts = p->nbatch = 0;
 	p->overflow = 0;
-	if (p->clear)
+	if (p->clear && !G_view.back)
 		border(p, &G_view);
 	layers(p, s, d, nd, &p->pal, 1);
 	if (s->outline_on && (nx = outline_pieces(s, d, nd, x)) > 0)
@@ -537,6 +537,56 @@ static void draw(struct gpriv *p, const struct disp_view *v)
 		sgpu_draw_range(&p->s, vb, SGPU_PRIM_TRIANGLES, b->first, b->count);
 	}
 	sgpu_update_end(&p->s);
+}
+
+/*
+ * The screen behind the front one, where it shows above it: its damage
+ * (all of it when the view changed) clipped to the rows above the split,
+ * through its own view and palette, before the front screen is drawn.
+ */
+static void compose_back(struct gpriv *p, struct disp *d, struct screen *b)
+{
+	struct disp_view bv = G_view;
+	struct rect r[DAMAGE_MAX], vis = { 0, 0, b->w, d->view.back ? ((d->view.oy -
+		d->view.boy) / (d->view.bsy > 0 ? (int)d->view.bsy : 1)) : 0 };
+	struct win *w;
+	uint32_t c[256];
+	int i, n = 0, clear = p->clear;
+
+	for (i = 0; i < 256; i++)
+		c[i] = ((uint32_t)b->palette[i][0] << 16) | ((uint32_t)b->palette[i][1] << 8) |
+		       b->palette[i][2];
+	if (memcmp(c, p->colours2, sizeof(c))) {
+		memcpy(p->colours2, c, sizeof(c));
+		sgpu_tex_write(&p->s, &p->pal2, p->colours2, sizeof(p->colours2));
+		clear = 1;
+	}
+	gtex_sync(p, &b->root);
+	for (w = b->bottom; w; w = w->above)
+		if (!w->dead)
+			gtex_sync(p, &w->bm);
+	if (clear) {
+		b->ndamage = 1;
+		b->damage[0] = rect_make(0, 0, b->w, b->h);
+	}
+	for (i = 0; i < b->ndamage; i++)
+		if (rect_intersect(&r[n], &b->damage[i], &vis))
+			n++;
+	b->ndamage = 0;
+	if (!n && !p->clear)
+		return;
+	bv.src = d->view.bsrc;
+	bv.sx = d->view.bsx;
+	bv.sy = d->view.bsy;
+	bv.ox = d->view.box;
+	bv.oy = d->view.boy;
+	p->nverts = p->nbatch = 0;
+	p->overflow = 0;
+	if (p->clear)
+		border(p, &bv);
+	if (n)
+		layers(p, b, r, n, &p->pal2, 1);
+	draw(p, &bv);
 }
 
 static void gpu_compose(struct disp *d, struct screen *s)
@@ -608,6 +658,8 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		p->t_cursor = us_between(&a, &b);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
+	if (G_view.back)
+		compose_back(p, d, G_view.back);
 	if (!s->ndamage)
 		return;
 	if (p->full)
@@ -677,13 +729,19 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	/* the CPU's composition of the same screen, through the same view, as the reference */
 	screen_compose(s, ref, &all, !s->hw_pointer);
+	if (d->view.back) {
+		struct rect ball = { 0, 0, d->view.bw, d->view.bh };
+		screen_compose(d->view.back, d->view.bsrc, &ball, 0);
+	}
 	for (y = 0; y < H; y++)
 		for (x = 0; x < W; x++) {
 			int sx, sy, in = disp_view_map(d, x, y, &sx, &sy);
-			uint32_t want = in ? p->colours[ref->px[(size_t)sy * ref->stride + sx]] : 0;
+			uint32_t want = in == 1 ? p->colours[ref->px[(size_t)sy * ref->stride + sx]] :
+					in == 2 ? p->colours2[d->view.bsrc->px[(size_t)sy *
+						d->view.bsrc->stride + sx]] : 0;
 			uint32_t got = img[(size_t)y * W + x] & 0xffffff;
 
-			if (in && in_ext(s, sx, sy))
+			if (in == 1 && in_ext(s, sx, sy))
 				continue;
 			total++;
 			if (got != want && bad++ < 5)
@@ -889,6 +947,8 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	if (mode && sscanf(mode, "%dx%d", &mw, &mh) == 2) {
 		cfg.w = (unsigned)mw;
 		cfg.h = (unsigned)mh;
+	} else {
+		cfg.w = cfg.h = 0;      /* the monitor's preferred mode */
 	}
 	cfg.retained = true;
 	cfg.quiet = true;
@@ -927,6 +987,8 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 #endif
 	sgpu_tex_create(&p->s, &p->pal, 256, 1, SGPU_TEX_XRGB8);
 	sgpu_tex_create(&p->s, &p->xpal, 256, 1, SGPU_TEX_XRGB8);
+	sgpu_tex_create(&p->s, &p->pal2, 256, 1, SGPU_TEX_XRGB8);
+	sgpu_tex_filter(&p->pal2, false, true);
 	sgpu_tex_filter(&p->pal, false, true);
 	sgpu_tex_filter(&p->xpal, false, true);
 	{

@@ -7,6 +7,13 @@
 #include <string.h>
 
 #include "disp.h"
+#include "wm.h"
+
+/* the screen behind's palette (wm.h's struct screen) */
+const void *disp_back_palette(const struct disp *d)
+{
+	return d->view.back->palette;
+}
 
 struct disp *disp_current;
 
@@ -133,6 +140,25 @@ void disp_set_view(struct disp *d, struct bm *src, int w, int h, float sx, float
 	v->gen++;
 }
 
+void disp_set_back(struct disp *d, struct screen *back, struct bm *src, int w, int h, float sx,
+		   float sy, int ox, int oy)
+{
+	struct disp_view *v = &d->view;
+
+	if (v->back == back && v->bsrc == src && v->bw == w && v->bh == h && v->bsx == sx &&
+	    v->bsy == sy && v->box == ox && v->boy == oy)
+		return;
+	v->back = back;
+	v->bsrc = src;
+	v->bw = w;
+	v->bh = h;
+	v->bsx = sx;
+	v->bsy = sy;
+	v->box = ox;
+	v->boy = oy;
+	v->gen++;
+}
+
 int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y)
 {
 	const struct disp_view *v = &d->view;
@@ -140,6 +166,15 @@ int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y)
 
 	if (!v->src || v->sx <= 0 || v->sy <= 0)
 		return 0;
+	if (v->back && Y < v->oy) {
+		fx = (X - v->box) / v->bsx;
+		fy = (Y - v->boy) / v->bsy;
+		if (fx < 0 || fy < 0)
+			return 0;
+		*x = (int)fx;
+		*y = (int)fy;
+		return *x < v->bw && *y < v->bh ? 2 : 0;
+	}
 	fx = (X - v->ox) / v->sx;
 	fy = (Y - v->oy) / v->sy;
 	if (fx < 0 || fy < 0)
@@ -152,6 +187,7 @@ int disp_view_map(const struct disp *d, int X, int Y, int *x, int *y)
 /* the screen as the display shows it, from the view's composition in RAM */
 int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char *path)
 {
+	const uint8_t (*backpal)[3] = d->view.back ? (const uint8_t (*)[3])disp_back_palette(d) : pal;
 	FILE *f = fopen(path, "wb");
 	const struct bm *src = d->view.src ? d->view.src : &d->fb;
 	int x, y, W = d->mw ? d->mw : d->fb.w, H = d->mh ? d->mh : d->fb.h * d->scale;
@@ -166,8 +202,13 @@ int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char 
 			int sx, sy;
 
 			/* outside the screen: black */
-			if (disp_view_map(d, x, y, &sx, &sy))
+			int m = disp_view_map(d, x, y, &sx, &sy);
+
+			if (m == 1)
 				memcpy(row + 3 * x, pal[src->px[(size_t)sy * src->stride + sx]], 3);
+			else if (m == 2)
+				memcpy(row + 3 * x, backpal[d->view.bsrc->px[(size_t)sy *
+					d->view.bsrc->stride + sx]], 3);
 			else
 				memset(row + 3 * x, 0, 3);
 		}
