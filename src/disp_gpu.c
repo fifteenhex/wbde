@@ -45,10 +45,18 @@
 #define MAXBATCH	256
 #define NEEDED_CAPS	(SGPU_CAP_TEXTURES | SGPU_CAP_RETAINED | SGPU_CAP_TEX_RECT)
 
-/* a bitmap's texture (bm->gpu) */
+/*
+ * A bitmap's texture (bm->gpu), with a copy in RAM of what the texture
+ * holds: a dirty rectangle is compared against it and only the longwords
+ * that differ go over the bus.  Workbench repaints a whole drawer (or the
+ * backdrop) to change one icon's selection, and clients repaint whole
+ * windows for a few changed pixels; comparing in RAM costs a fraction of
+ * storing across the Mediator.
+ */
 struct gtex {
 	sgpu_tex t;
 	int w, h;
+	uint8_t *shadow;		/* bm->stride a row, like the bitmap */
 };
 
 /* a window's shared content (win->ext) */
@@ -90,8 +98,8 @@ struct gpriv {
 	int cur_hx, cur_hy, cur_key, cur_x, cur_y, cur_shown;
 	unsigned int cur_palgen;	/* the palette the image was made with */
 	/* what the flush cost */
-	long up_bytes;
-	unsigned int up_rects, ntex;
+	long up_bytes, up_cmp, t_create, t_cursor;
+	unsigned int up_rects, ntex, ncreate;
 };
 
 static struct gpriv *G;		/* for the free hooks */
@@ -112,6 +120,7 @@ static void gtex_free(struct bm *bm)
 	if (!g || !G)
 		return;
 	sgpu_tex_free(&G->s, &g->t);
+	free(g->shadow);
 	free(g);
 	bm->gpu = NULL;
 	G->ntex--;
@@ -129,10 +138,16 @@ static struct gtex *gtex_sync(struct gpriv *p, struct bm *bm)
 		gtex_free(bm);
 	g = bm->gpu;
 	if (!g) {
+		struct timespec a, b;
+
+		clock_gettime(CLOCK_MONOTONIC, &a);
 		g = calloc(1, sizeof(*g));
 		if (!g)
 			return NULL;
-		if (sgpu_tex_create(&p->s, &g->t, (unsigned)bm->w, (unsigned)bm->h, SGPU_TEX_R8)) {
+		g->shadow = malloc((size_t)bm->stride * bm->h);
+		if (!g->shadow || sgpu_tex_create(&p->s, &g->t, (unsigned)bm->w, (unsigned)bm->h,
+						  SGPU_TEX_R8)) {
+			free(g->shadow);
 			free(g);
 			return NULL;
 		}
@@ -141,15 +156,29 @@ static struct gtex *gtex_sync(struct gpriv *p, struct bm *bm)
 		g->h = bm->h;
 		bm->gpu = g;
 		p->ntex++;
-		bm_dirty_all(bm);
+		/* all of it once; the shadow starts as what was sent */
+		sgpu_tex_write_rect(&p->s, &g->t, 0, 0, (unsigned)bm->w, (unsigned)bm->h, bm->px,
+				    (unsigned)bm->stride);
+		memcpy(g->shadow, bm->px, (size_t)bm->stride * bm->h);
+		p->up_bytes += (long)bm->w * bm->h;
+		p->up_cmp += (long)bm->w * bm->h;
+		p->up_rects++;
+		bm->ndirty = 0;
+		clock_gettime(CLOCK_MONOTONIC, &b);
+		p->t_create += us_between(&a, &b);
+		p->ncreate++;
 	}
 	for (i = 0; i < bm->ndirty; i++) {
 		const struct rect *r = &bm->dirty[i];
+		size_t at = (size_t)r->y * bm->stride + r->x;
+		long n;
 
-		sgpu_tex_write_rect(&p->s, &g->t, (unsigned)r->x, (unsigned)r->y, (unsigned)r->w,
-				    (unsigned)r->h, bm->px + (size_t)r->y * bm->stride + r->x,
-				    (unsigned)bm->stride);
-		p->up_bytes += (long)r->w * r->h;
+		n = sgpu_tex_update_rect(&p->s, &g->t, (unsigned)r->x, (unsigned)r->y,
+					 (unsigned)r->w, (unsigned)r->h, bm->px + at,
+					 (unsigned)bm->stride, g->shadow + at, (unsigned)bm->stride);
+		if (n > 0)
+			p->up_bytes += n;
+		p->up_cmp += (long)r->w * r->h;
 		p->up_rects++;
 	}
 	bm->ndirty = 0;
@@ -459,7 +488,10 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		return;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	p->up_bytes = 0;
+	p->up_cmp = 0;
 	p->up_rects = 0;
+	p->t_create = p->t_cursor = 0;
+	p->ncreate = 0;
 	/* what was drawn into the layers, to their textures */
 	gtex_sync(p, &s->root);
 	for (w = s->bottom; w; w = w->above)
@@ -475,8 +507,14 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		p->pal_changed = 0;
 		screen_damage_all(s);
 	}
-	if (p->cursor)
+	if (p->cursor) {
+		struct timespec a, b;
+
+		clock_gettime(CLOCK_MONOTONIC, &a);
 		cursor_update(p, d, s);
+		clock_gettime(CLOCK_MONOTONIC, &b);
+		p->t_cursor = us_between(&a, &b);
+	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	if (!s->ndamage)
 		return;
@@ -494,10 +532,12 @@ static void gpu_compose(struct disp *d, struct screen *s)
 	if (sgpu_error(&p->s))
 		fprintf(stderr, "wbde: the GPU display failed: %s (%d)\n", p->s.err_what, p->s.err);
 	snprintf(d->timing, sizeof(d->timing),
-		 "flush %ld px: upload %ld B in %u rects %ld us, %u quads %u draws %ld us, "
-		 "submit %ld us, gpu %.0f us", area, p->up_bytes, p->up_rects, us_between(&t0, &t1),
-		 p->nverts / 6, p->nbatch, us_between(&t1, &t2), us_between(&t2, &t3),
-		 sgpu_update_gpu_time(&p->s) * 1e6);
+		 "flush %ld px: upload %ld B of %ld in %u rects %ld us, %u quads %u draws %ld us, "
+		 "submit %ld us, gpu %.0f us (new textures %u %ld us, cursor %ld us)", area,
+		 p->up_bytes, p->up_cmp, p->up_rects, us_between(&t0, &t1),
+		 p->nverts / 6, p->nbatch,
+		 us_between(&t1, &t2), us_between(&t2, &t3), sgpu_update_gpu_time(&p->s) * 1e6,
+		 p->ncreate, p->t_create, p->t_cursor);
 }
 
 /* ------------------------------------------------------------------ */
