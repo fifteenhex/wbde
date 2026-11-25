@@ -648,6 +648,19 @@ static void drawer_close_cb(struct win *w)
 	drawer_close(WB, w->priv);
 }
 
+/* the stopwatch while something slow happens, on screen before it starts */
+static void busy(struct wb *wb, int on)
+{
+	if (!wb->env->have_busy)
+		return;
+	if (on)
+		screen_set_pointer(wb->s, &wb->env->busy, wb->env->busy_hx, wb->env->busy_hy, 0);
+	else
+		screen_set_pointer(wb->s, &wb->env->pointer, wb->env->ptr_hx, wb->env->ptr_hy, 0);
+	if (on && wb->s->flush_now)
+		wb->s->flush_now();
+}
+
 static struct drawer *open_drawer(struct wb *wb, const char *path, const char *title,
 				  const struct icon *geom, struct iconview *from)
 {
@@ -688,7 +701,9 @@ static struct drawer *open_drawer(struct wb *wb, const char *path, const char *t
 	}
 	d->next = wb->drawers;
 	wb->drawers = d;
+	busy(wb, 1);
 	drawer_scan(wb, d);
+	busy(wb, 0);
 	{
 		struct rect in;
 

@@ -99,6 +99,45 @@ static int rom_prefs(struct wbenv *env)
 	return found_ptr ? 0 : -ENOENT;
 }
 
+/*
+ * The busy pointer (the stopwatch) is in intuition.library as two separate
+ * 16 row planes, plane 0 then plane 1: in 3.1.4 at 0xfec4d8 and 0xfec4f8.
+ * Its first rows (the stopwatch's button and crown) are the ones the RKM
+ * prints for its own wait pointer, which makes a good key to find it by;
+ * what is shown is what the ROM holds. Hot spot as SetPointer(..., -6, 0).
+ */
+static void rom_busy_pointer(struct wbenv *env)
+{
+	static const uint8_t key[] = { 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07, 0xc0 };
+	const struct rom *rom = &env->rom;
+	uint32_t a;
+	int x, y;
+
+	for (a = rom->base; rom_in(rom, a, 64); a += 2) {
+		if (memcmp(rom_ptr(rom, a), key, sizeof(key)))
+			continue;
+		/* sprite data: every plane 0 bit has a plane 1 bit or is the button */
+		if (bm_alloc(&env->busy, 16, 16))
+			return;
+		for (y = 0; y < 16; y++) {
+			uint16_t p0 = rom_w(rom, a + (uint32_t)y * 2);
+			uint16_t p1 = rom_w(rom, a + 32 + (uint32_t)y * 2);
+
+			for (x = 0; x < 16; x++) {
+				int v = ((p0 >> (15 - x)) & 1) | (((p1 >> (15 - x)) & 1) << 1);
+
+				env->busy.px[y * env->busy.stride + x] =
+					(uint8_t)(v ? PTR_PEN0 + v - 1 : 0);
+			}
+		}
+		env->busy_hx = 6;
+		env->busy_hy = 0;
+		env->have_busy = 1;
+		env_logf(env, "busy pointer: 16x16 from ROM at %06x", a);
+		return;
+	}
+}
+
 /* the defaults compiled into icon.library, by do_Type */
 static void icon_library_defaults(struct wbenv *env)
 {
@@ -464,6 +503,7 @@ int env_load(struct wbenv *env, const char *sysdir)
 			 env->topaz9 ? "from ROM" : "MISSING");
 		if (rom_prefs(env))
 			env_logf(env, "pointer: none found in ROM");
+		rom_busy_pointer(env);
 	}
 	if (!env->topaz8)
 		return -ENOENT;

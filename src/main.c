@@ -306,6 +306,7 @@ int main(int argc, char **argv)
 
 	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
 	memcpy(S.palette, ENV.pal, sizeof(S.palette));
+	S.flush_now = flush;
 	S.mx = S.w / 2;
 	S.my = S.h / 2;
 	screen_set_pointer(&S, &ENV.pointer, ENV.ptr_hx, ENV.ptr_hy, 0);

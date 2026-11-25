@@ -137,6 +137,7 @@ struct screen {
 	/* the screen depth gadget was pressed */
 	int bar_depth_pressed;
 	void (*palette_changed)(struct screen *s);
+	void (*flush_now)(void);	/* get what is drawn onto the display, now */
 	void (*bar_depth)(struct screen *s);	/* the screen depth gadget */
 };
 
