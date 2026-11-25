@@ -11,10 +11,26 @@ struct rect {
 	int x, y, w, h;
 };
 
+#define BM_DIRTY_MAX 8
+
 struct bm {
 	int w, h, stride;
 	uint8_t *px;
+	/*
+	 * What has been drawn since a display that keeps its own copy of this
+	 * bitmap (a GPU texture) last took it: rectangles in bitmap
+	 * coordinates, merged when that costs little.  Every rp_* drawing call
+	 * adds what it touched; bm_alloc marks the whole bitmap.
+	 */
+	int ndirty;
+	struct rect dirty[BM_DIRTY_MAX];
+	void *gpu;			/* the display's copy, freed with the bitmap */
 };
+
+/* a display that keeps copies of bitmaps frees its copy here */
+extern void (*bm_free_hook)(struct bm *bm);
+void bm_dirty(struct bm *bm, const struct rect *r);
+void bm_dirty_all(struct bm *bm);
 
 /* Where drawing goes: a bitmap, a clip in bitmap coords, an origin */
 struct rp {

@@ -4,24 +4,87 @@
 #include "gfx.h"
 #include "font.h"
 
+void (*bm_free_hook)(struct bm *bm);
+
 int bm_alloc(struct bm *bm, int w, int h)
 {
 	if (w < 1)
 		w = 1;
 	if (h < 1)
 		h = 1;
+	memset(bm, 0, sizeof(*bm));
 	bm->w = w;
 	bm->h = h;
 	bm->stride = (w + 3) & ~3;
 	bm->px = calloc((size_t)bm->stride, (size_t)h);
+	bm_dirty_all(bm);
 	return bm->px ? 0 : -1;
 }
 
 void bm_free(struct bm *bm)
 {
+	if (bm->gpu && bm_free_hook)
+		bm_free_hook(bm);
+	bm->gpu = NULL;
 	free(bm->px);
 	bm->px = NULL;
 	bm->w = bm->h = 0;
+	bm->ndirty = 0;
+}
+
+static long rarea(const struct rect *r)
+{
+	return (long)r->w * r->h;
+}
+
+/*
+ * The same merging rule as the screen's damage: join two rectangles when
+ * the union covers little more than the two do, keep them apart when they
+ * are far from each other (a window's four border strips stay four).
+ */
+void bm_dirty(struct bm *bm, const struct rect *in)
+{
+	struct rect r, all = { 0, 0, bm->w, bm->h };
+	int i, best = -1;
+	long bestgrow = 0;
+
+	if (!rect_intersect(&r, in, &all))
+		return;
+	for (i = 0; i < bm->ndirty; i++) {
+		struct rect u = bm->dirty[i], x;
+		long grow;
+
+		rect_union(&u, &r);
+		grow = rarea(&u) - rarea(&bm->dirty[i]) - rarea(&r);
+		if (rect_intersect(&x, &bm->dirty[i], &r))
+			grow += rarea(&x);
+		if (grow <= 256) {
+			bm->dirty[i] = u;
+			return;
+		}
+		if (best < 0 || grow < bestgrow) {
+			best = i;
+			bestgrow = grow;
+		}
+	}
+	if (bm->ndirty < BM_DIRTY_MAX) {
+		bm->dirty[bm->ndirty++] = r;
+		return;
+	}
+	rect_union(&bm->dirty[best], &r);
+}
+
+void bm_dirty_all(struct bm *bm)
+{
+	bm->ndirty = 1;
+	bm->dirty[0] = rect_make(0, 0, bm->w, bm->h);
+}
+
+static void touched(struct rp *rp, int x, int y, int w, int h)
+{
+	struct rect r = { x, y, w, h };
+
+	bm_dirty(rp->bm, &r);
 }
 
 int rect_intersect(struct rect *out, const struct rect *a, const struct rect *b)
@@ -96,6 +159,7 @@ void rp_fill(struct rp *rp, int x, int y, int w, int h, int pen)
 
 	if (!clipped(rp, &x, &y, &w, &h))
 		return;
+	touched(rp, x, y, w, h);
 	p = rp->bm->px + (size_t)y * rp->bm->stride + x;
 	while (h--) {
 		memset(p, pen, (size_t)w);
@@ -157,6 +221,7 @@ void rp_xor_rect(struct rp *rp, int x, int y, int w, int h, int mask)
 
 	if (!clipped(rp, &x, &y, &w, &h))
 		return;
+	touched(rp, x, y, w, h);
 	p = rp->bm->px + (size_t)y * rp->bm->stride + x;
 	while (h--) {
 		for (i = 0; i < w; i++)
@@ -185,6 +250,7 @@ void rp_blit(struct rp *rp, int x, int y, const struct bm *src,
 	ch = h;
 	if (w <= 0 || h <= 0 || !clipped(rp, &dx, &dy, &cw, &ch))
 		return;
+	touched(rp, dx, dy, cw, ch);
 	sx += dx - (x + rp->ox);
 	sy += dy - (y + rp->oy);
 	s = src->px + (size_t)sy * src->stride + sx;
@@ -209,6 +275,7 @@ void rp_pattern(struct rp *rp, int x, int y, int w, int h, const struct bm *pat)
 
 	if (!clipped(rp, &x, &y, &w, &h))
 		return;
+	touched(rp, x, y, w, h);
 	for (row = 0; row < h; row++) {
 		const uint8_t *s = pat->px + (size_t)((y + row) % pat->h) * pat->stride;
 		int sx = x % pat->w;
@@ -229,6 +296,7 @@ void rp_ghost(struct rp *rp, int x, int y, int w, int h, int pen)
 
 	if (!clipped(rp, &x, &y, &w, &h))
 		return;
+	touched(rp, x, y, w, h);
 	for (row = 0; row < h; row++) {
 		d = rp->bm->px + (size_t)(y + row) * rp->bm->stride;
 		for (col = x + ((x + y + row) & 1); col < x + w; col += 2)
@@ -271,6 +339,13 @@ int rp_text(struct rp *rp, const struct font *f, int x, int y,
 			}
 		}
 		x += g->space + (f->bold ? 1 : 0);
+	}
+	{
+		/* what the string covered, with room for kerning either side */
+		struct rect r = { start - 8 + rp->ox, y + rp->oy, x - start + 16, f->ysize }, c;
+
+		if (rect_intersect(&c, &r, &rp->clip))
+			bm_dirty(rp->bm, &c);
 	}
 	return x - start;
 }
