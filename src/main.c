@@ -242,6 +242,14 @@ void screens_palette(struct screen *s)
 		disp_palette(&D, s->palette);
 }
 
+void screens_std_pointer(struct screen *s, int busy)
+{
+	if (busy && ENV.have_busy)
+		screen_set_pointer(s, &ENV.busy, ENV.busy_hx, ENV.busy_hy, 0);
+	else
+		screen_set_pointer(s, &ENV.pointer, ENV.ptr_hx, ENV.ptr_hy, 0);
+}
+
 /* the Workbench screen's depth gadget */
 static void wb_bar_depth(struct screen *s)
 {

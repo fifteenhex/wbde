@@ -42,6 +42,10 @@ struct cwin {
 	int vram;		/* the buffer is the display's, in VRAM (WBP_WF_VRAM) */
 	int attached;		/* the content is a buffer the client attached */
 	uint32_t idcmp;
+	/* its pointer, while it is the active window */
+	int ptr_kind;		/* WBP_PTR_* */
+	struct bm ptr;
+	int ptr_hx, ptr_hy;
 	/* menus the client gave */
 	struct menustrip strip;
 	struct menu *menus;
@@ -324,9 +328,51 @@ static void cw_resized(struct win *w)
 	send_event(cw, IDCMP_NEWSIZE, 0, 0, 0, 0, 0);
 }
 
+/* the window's own pointer goes with its being active */
+static void show_pointer(struct cwin *cw, int active)
+{
+	if (active && cw->ptr_kind == WBP_PTR_IMAGE && cw->ptr.px)
+		screen_set_pointer(cw->scr, &cw->ptr, cw->ptr_hx, cw->ptr_hy, 0);
+	else
+		screens_std_pointer(cw->scr, active && cw->ptr_kind == WBP_PTR_BUSY);
+}
+
 static void cw_activate(struct win *w, int active)
 {
-	send_event(w->priv, active ? IDCMP_ACTIVEWINDOW : IDCMP_INACTIVEWINDOW, 0, 0, 0, 0, 0);
+	struct cwin *cw = w->priv;
+
+	if (active || cw->ptr_kind != WBP_PTR_NORMAL)
+		show_pointer(cw, active);
+	send_event(cw, active ? IDCMP_ACTIVEWINDOW : IDCMP_INACTIVEWINDOW, 0, 0, 0, 0, 0);
+}
+
+static void set_pointer(struct cwin *cw, const uint8_t *p, uint32_t len)
+{
+	const struct wbp_pointer *wp = (const struct wbp_pointer *)p;
+	uint32_t kind;
+
+	if (len < 4)
+		return;
+	memcpy(&kind, p, 4);
+	bm_free(&cw->ptr);
+	cw->ptr_kind = WBP_PTR_NORMAL;
+	if (kind == WBP_PTR_IMAGE && len >= sizeof(*wp) && wp->width && wp->height &&
+	    wp->width <= 64 && wp->height <= 64 &&
+	    len >= sizeof(*wp) + (uint32_t)wp->width * wp->height &&
+	    !bm_alloc(&cw->ptr, wp->width, wp->height)) {
+		int y;
+
+		for (y = 0; y < wp->height; y++)
+			memcpy(cw->ptr.px + (size_t)y * cw->ptr.stride,
+			       p + sizeof(*wp) + (size_t)y * wp->width, wp->width);
+		cw->ptr_kind = WBP_PTR_IMAGE;
+		cw->ptr_hx = wp->hx;
+		cw->ptr_hy = wp->hy;
+	} else if (kind == WBP_PTR_BUSY) {
+		cw->ptr_kind = WBP_PTR_BUSY;
+	}
+	if (cw->w && cw->scr->active == cw->w)
+		show_pointer(cw, 1);
 }
 
 static const struct win_ops cw_ops = {
@@ -445,9 +491,12 @@ static void destroy_win(struct cwin *cw)
 			*p = cw->next;
 			break;
 		}
+	if (cw->w && cw->scr->active == cw->w && cw->ptr_kind != WBP_PTR_NORMAL)
+		screens_std_pointer(cw->scr, 0);
 	if (cw->w)
 		win_close(cw->scr, cw->w);	/* and the display's content with it */
 	cw->w = NULL;
+	bm_free(&cw->ptr);
 	free_menus(cw);
 	if (cw->shm)
 		munmap(cw->shm, cw->shmsize);
@@ -940,6 +989,8 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 				  (int)(h->len / sizeof(struct wbp_menuitem)));
 		break;
 	case WBP_SET_POINTER:
+		if (cw)
+			set_pointer(cw, p, h->len);
 		break;
 	case WBP_OBTAIN_PEN:
 		if (h->len >= 3) {

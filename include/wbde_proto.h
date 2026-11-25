@@ -32,7 +32,7 @@ enum wbp_type {
 	WBP_TO_BACK,
 	WBP_ACTIVATE,
 	WBP_SET_MENUS,		/* wbp_menuitem[] */
-	WBP_SET_POINTER,	/* uint32_t: 0 normal, 1 busy */
+	WBP_SET_POINTER,	/* uint32_t: 0 normal, 1 busy; or wbp_pointer + an image */
 	WBP_OBTAIN_PEN,		/* uint8_t rgb[3] -> WBP_PEN */
 	WBP_GET_FONT,		/* -> WBP_FONT */
 	WBP_ATTACH,		/* wbp_attach + a dma-buf fd (none: detach) -> WBP_ATTACHED */
@@ -138,6 +138,23 @@ struct wbp_screenbuf {
 	uint16_t barheight;		/* the title bar wbde draws */
 	uint16_t wbortop, wborleft, wborright, wborbottom;
 	uint32_t size;			/* bytes to mmap */
+};
+
+/*
+ * WBP_SET_POINTER: the window's pointer, shown while it is the active
+ * window (as Intuition does).  A bare uint32_t kind is enough for the
+ * first two; an image is width x height pens, 0 transparent (an Amiga
+ * sprite's colours are pens 17, 18, 19), one pen a pointer pixel at the
+ * Workbench pointer's own size.
+ */
+#define WBP_PTR_NORMAL		0
+#define WBP_PTR_BUSY		1
+#define WBP_PTR_IMAGE		2
+
+struct wbp_pointer {
+	uint32_t kind;			/* WBP_PTR_* */
+	int16_t hx, hy;			/* the hot spot, in the image */
+	uint16_t width, height;		/* then width * height pens */
 };
 
 struct wbp_palette {

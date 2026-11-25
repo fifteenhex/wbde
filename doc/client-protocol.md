@@ -59,7 +59,7 @@ both ends are on the same machine.  A request that fails is answered with
 | `WBP_MOVE_SIZE` | `wbp_rect`: outer position, inner size | maybe `WBP_WINDOW` |
 | `WBP_TO_FRONT`, `WBP_TO_BACK`, `WBP_ACTIVATE` | - | - |
 | `WBP_SET_MENUS` | `wbp_menuitem[]` | - |
-| `WBP_SET_POINTER` | `uint32_t` 0 normal, 1 busy (accepted, not shown) | - |
+| `WBP_SET_POINTER` | `uint32_t` 0 normal, 1 busy, or `wbp_pointer` + an image (see Window pointers) | - |
 | `WBP_OBTAIN_PEN` | `uint8_t rgb[3]` | `WBP_PEN`: `uint32_t` pen |
 | `WBP_GET_FONT` | - | `WBP_FONT` |
 | `WBP_ATTACH` | `wbp_attach` + a dma-buf fd (none: detach) | `WBP_ATTACHED` (see GPU buffers) |
@@ -220,9 +220,17 @@ them.
   click on a screen's depth gadget sends that screen to the back.
 - A client that goes takes its screens with it.
 
+## Window pointers
+
+`WBP_SET_POINTER` with a `wbp_pointer { kind, hx, hy, width, height }`
+followed by width x height pens (0 transparent; an Amiga sprite's colours
+are pens 17, 18 and 19) gives the window its own pointer, shown while it
+is the active window, as Intuition's `SetPointer()` does.  A bare
+`uint32_t` kind is enough for `WBP_PTR_NORMAL` and `WBP_PTR_BUSY`.
+
 ## Not provided
 
-Busy pointer images, requesters drawn by wbde for a client (`EasyRequest`
-can be a client window), gadgets drawn by wbde inside the inner area
-(gadtools can be done client side), the clipboard, and AppIcons and
-AppWindows (dropping Workbench icons onto a window).
+Requesters drawn by wbde for a client (`EasyRequest` can be a client
+window), gadgets drawn by wbde inside the inner area (gadtools can be done
+client side), the clipboard, and AppIcons and AppWindows (dropping
+Workbench icons onto a window).
