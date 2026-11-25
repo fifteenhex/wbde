@@ -27,8 +27,13 @@ static int soft_open(struct disp *d, const char *mode, const char *size)
 	void *cntx;
 	int w = 0, h = 0;
 
-	if (mode)
-		setenv("SMOL2D_MODE", mode, 1);
+	/* the software display stays small: scaling a big one by the CPU
+	   is what it cannot afford */
+	if (!mode)
+		mode = "640x480";
+	if (!size)
+		size = "640x240";
+	setenv("SMOL2D_MODE", mode, 1);
 	if (smol2d_init(&cntx, SMOL2D_CS_C8)) {
 		fprintf(stderr, "wbde: smol2d could not open the display in C8\n");
 		return -1;

@@ -12,18 +12,27 @@ static int file_open(struct disp *d, const char *mode, const char *size)
 {
 	int w = 640, h = 480, sw, sh;
 
+	if (!size && !mode)
+		size = "640x240";
 	if (mode)
 		sscanf(mode, "%dx%d", &w, &h);
 	d->scale = 1;
+	d->mw = w;
+	d->mh = h;
 	if (size && sscanf(size, "%dx%d", &sw, &sh) == 2 && sw == w && sh > 0 && h % sh == 0) {
+		/* the old Workbench: the mode's width, rows doubled */
 		d->scale = h / sh;
 		h = sh;
+	} else if (size && sscanf(size, "%dx%d", &sw, &sh) == 2 && sw > 0 && sh > 0) {
+		/* any logical size, scaled uniformly like the GPU display does */
+		w = sw;
+		h = sh;
+		d->uniform = 1;
 	}
-	d->mw = w;
-	d->mh = h * d->scale;
 	if (bm_alloc(&d->fb, w, h))
 		return -1;
-	snprintf(d->desc, sizeof(d->desc), "memory, %dx%d, rows x%d", w, h, d->scale);
+	snprintf(d->desc, sizeof(d->desc), "memory, %dx%d, screen %dx%d%s", d->mw, d->mh, w, h,
+		 d->scale > 1 ? ", rows doubled" : "");
 	return 0;
 }
 

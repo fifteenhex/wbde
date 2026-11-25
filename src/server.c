@@ -648,7 +648,7 @@ static void do_open_screen(struct client *c, const struct wbp_hdr *h, const stru
 	char title[81];
 
 	if (w < 16 || ht < 16 || w > 4096 || ht > 4096 || n->depth < 1 || n->depth > 8 ||
-	    !n->sx_num || !n->sx_den || !n->sy_num || !n->sy_den) {
+	    (n->sx_num && (!n->sx_den || !n->sy_num || !n->sy_den))) {
 		send_error(c, h, EINVAL);
 		return;
 	}
@@ -684,8 +684,11 @@ static void do_open_screen(struct client *c, const struct wbp_hdr *h, const stru
 		cs->s.pens[i] = n->pens[i];
 	memcpy(cs->s.palette, n->palette, sizeof(cs->s.palette));
 	cs->s.ncolours = 1 << n->depth;
-	cs->s.sx = (float)n->sx_num / n->sx_den;
-	cs->s.sy = (float)n->sy_num / n->sy_den;
+	if (n->sx_num) {                /* the client's own scale */
+		cs->s.sx = (float)n->sx_num / n->sx_den;
+		cs->s.sy = (float)n->sy_num / n->sy_den;
+	} else                          /* the largest whole one that fits */
+		cs->s.sx = cs->s.sy = (float)screens_fit_scale(w, ht);
 	cs->s.id = (int)cs->id;
 	cs->s.owner = cs;
 	cs->s.bar_depth = cs_bar_depth;

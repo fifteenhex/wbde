@@ -30,6 +30,9 @@
 static struct disp D;
 static struct screen S;			/* the Workbench screen */
 static struct screen *front = &S, *stack = &S;	/* the screen stack, front first */
+/* display pixels a mouse count moves: on a big monitor the pointer
+   crosses it as fast as it crosses a 640 pixel one */
+static float motion_gain = 1;
 static struct wbenv ENV;
 static struct wb W;
 static volatile sig_atomic_t got_chld, got_quit, got_shot;
@@ -121,6 +124,14 @@ static void view_update(void)
 			s->oy = D.mh - vh;
 	}
 	disp_set_view(&D, s->fb, s->w, s->h, s->sx, s->sy, s->ox, s->oy);
+}
+
+/* the largest whole scale at which a w x h screen fits the display */
+int screens_fit_scale(int w, int h)
+{
+	int k = w > 0 && h > 0 ? (D.mw / w < D.mh / h ? D.mw / w : D.mh / h) : 1;
+
+	return k < 1 ? 1 : k;
 }
 
 void screens_fit(struct screen *s)
@@ -288,8 +299,8 @@ static void cb_motion(void *arg, int dx, int dy)
 	struct screen *s = front;
 
 	(void)arg;
-	s->fx += dx / s->sx;
-	s->fy += dy * D.scale / s->sy;
+	s->fx += dx * motion_gain / s->sx;
+	s->fy += dy * D.scale * motion_gain / s->sy;
 	pointer_moved(s, now_ms());
 }
 
@@ -641,9 +652,12 @@ static void ctl_service(void)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--conf FILE] [--rom FILE]\n"
-		"            [--script FILE] [--socket PATH] [--pattern ILBM] [--drawer-pattern ILBM]\n"
-		"            [--display gpu|soft|file]\n");
+		"usage: wbde [--mode WxH] [--size WxH] [--scale N] [--sys DIR] [--conf FILE]\n"
+		"            [--rom FILE] [--script FILE] [--socket PATH] [--pattern ILBM]\n"
+		"            [--drawer-pattern ILBM] [--display gpu|soft|file]\n"
+		"  --mode: the display mode (GPU default: the monitor's own)\n"
+		"  --size: Workbench's logical size (GPU default: the mode, 1:1)\n"
+		"  --scale: Workbench's scale (GPU default: the largest whole number that fits)\n");
 }
 
 int main(int argc, char **argv)
@@ -659,15 +673,21 @@ int main(int argc, char **argv)
 		{ "pattern", required_argument, NULL, 'p' },
 		{ "drawer-pattern", required_argument, NULL, 'P' },
 		{ "display", required_argument, NULL, 'D' },
+		{ "scale", required_argument, NULL, 'x' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 },
 	};
-	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *conf = NULL, *script = NULL;
+	/* the display's own mode and, on the GPU display, Workbench as big as
+	   it (1:1); the software and memory displays stay 640x480 with a
+	   640x240 Workbench, rows doubled */
+	const char *mode = getenv("WBDE_MODE"), *size = getenv("WBDE_SIZE"), *sys = "/mnt/sys";
+	const char *conf = NULL, *script = NULL;
+	float scale = getenv("WBDE_SCALE") ? (float)atof(getenv("WBDE_SCALE")) : 0;
 	const char *sock = NULL, *pattern = NULL, *dpattern = NULL, *display = NULL;
 	struct sigaction sa;
 	int o;
 
-	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:k:p:P:D:h", opts, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "m:z:s:c:r:S:k:p:P:D:x:h", opts, NULL)) != -1) {
 		switch (o) {
 		case 'm': mode = optarg; break;
 		case 'z': size = optarg; break;
@@ -679,6 +699,7 @@ int main(int argc, char **argv)
 		case 'p': pattern = optarg; break;
 		case 'P': dpattern = optarg; break;
 		case 'D': display = optarg; break;
+		case 'x': scale = (float)atof(optarg); break;
 		default: usage(); return o == 'h' ? 0 : 1;
 		}
 	}
@@ -720,7 +741,14 @@ int main(int argc, char **argv)
 
 	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
 	S.hw_pointer = D.hw_pointer;
-	S.sy = (float)D.scale;
+	if (D.composes || D.uniform) {
+		/* a uniform scale, square pixels, centred: the largest whole
+		   number that fits unless told */
+		S.sx = S.sy = scale > 0 ? scale : (float)screens_fit_scale(S.w, S.h);
+		motion_gain = D.mw > 640 ? D.mw / 640.0f : 1;
+	} else
+		S.sy = (float)D.scale;
+	env_logf(&ENV, "Workbench: %dx%d at %gx on %dx%d", S.w, S.h, S.sx, D.mw, D.mh);
 	S.bar_depth = wb_bar_depth;
 	memcpy(S.palette, ENV.pal, sizeof(S.palette));
 	S.flush_now = flush;

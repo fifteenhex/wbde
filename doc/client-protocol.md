@@ -205,8 +205,8 @@ them.
   the display mode (an Amiga ModeID) and so how big a pixel is; wbde only
   fits the result to the monitor, centred, and scrolled with the pointer
   when it is bigger than the monitor (Intuition's autoscroll).
-  Outside the screen the display shows the screen's colour 0, as an
-  Amiga shows its border.
+  A scale of 0 is wbde's choice, the largest whole scale that fits, as
+  for Workbench.  Outside the screen the display is black.
   amigafmt asks for whole numbers from the ModeID: low resolution 2
   across, high 1, super-high 1/2; 2 down unless interlaced.
 - The screen's own pixels (what its RastPort draws, under every window)

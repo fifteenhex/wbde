@@ -78,6 +78,7 @@ struct disp {
 	int border_pen;		/* the software display's darkest pen, for the border */
 	struct disp_view view;
 	int composes;		/* ops->compose, not software composition */
+	int uniform;		/* Workbench at any size, scaled uniformly (as composing ones) */
 	int hw_pointer;		/* the pointer is not drawn into the screen */
 	const struct disp_ops *ops;
 	void *priv;

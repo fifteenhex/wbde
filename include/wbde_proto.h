@@ -129,7 +129,8 @@ struct wbp_open {
 struct wbp_newscreen {
 	uint16_t width, height, depth;
 	uint16_t flags;			/* WBP_SF_* */
-	uint16_t sx_num, sx_den, sy_num, sy_den;
+	uint16_t sx_num, sx_den, sy_num, sy_den;	/* 0: wbde's choice, the largest
+							   whole scale that fits */
 	uint8_t pens[16];		/* WBP_NUMPENS used */
 	char title[80];
 	uint8_t palette[256][3];

@@ -101,6 +101,7 @@ struct gpriv {
 	const struct bm *cur_bm;
 	int cur_hx, cur_hy, cur_key, cur_x, cur_y, cur_shown;
 	unsigned int cur_palgen;	/* the palette the image was made with */
+	int cur_kx, cur_ky;		/* the scale the image was made at */
 	/* what the flush cost */
 	long up_bytes, up_cmp, t_create, t_cursor;
 	unsigned int up_rects, ntex, ncreate;
@@ -233,6 +234,34 @@ static void xor_palette(struct gpriv *p, int mask)
 	p->xormask = mask;
 }
 
+/* how many cursor pixels a pointer pixel takes: the view's scale (rows
+   doubled on the old 640x240 Workbench) */
+static int cur_kx(const struct disp *d)
+{
+	int k = d->view.src ? (int)(d->view.sx + 0.5f) : 1;
+
+	return k < 1 ? 1 : k;
+}
+
+static int cur_ky(const struct disp *d)
+{
+	int k = d->view.src ? (int)(d->view.sy + 0.5f) : d->scale;
+
+	return k < 1 ? 1 : k;
+}
+
+/* can the hardware cursor show s's pointer at the view's scale? */
+static int cursor_fits(struct gpriv *p, const struct disp *d, const struct screen *s)
+{
+	const struct bm *b = s->ptr;
+
+	if (!p->cursor || !b)
+		return 0;
+	if (d->view.sx != (float)cur_kx(d) || d->view.sy != (float)cur_ky(d))
+		return 0;               /* not a whole scale */
+	return b->w * cur_kx(d) <= SGPU_CURSOR_SIZE && b->h * cur_ky(d) <= SGPU_CURSOR_SIZE;
+}
+
 /* the pointer as the hardware cursor: a new image when it or the palette changed */
 static void cursor_update(struct gpriv *p, struct disp *d, struct screen *s)
 {
@@ -246,18 +275,22 @@ static void cursor_update(struct gpriv *p, struct disp *d, struct screen *s)
 		return;
 	}
 	if (b != p->cur_bm || s->ptr_hx != p->cur_hx || s->ptr_hy != p->cur_hy ||
-	    s->ptr_key != p->cur_key || p->cur_palgen != p->palgen) {
+	    s->ptr_key != p->cur_key || p->cur_palgen != p->palgen ||
+	    cur_kx(d) != p->cur_kx || cur_ky(d) != p->cur_ky) {
 		uint32_t img[SGPU_CURSOR_SIZE * SGPU_CURSOR_SIZE];
-		int h = b->h * d->scale;
+		int kx = cur_kx(d), ky = cur_ky(d), h = b->h * ky, w = b->w * kx;
 
+		/* the pointer at the screen's scale, as everything else on it */
 		memset(img, 0, sizeof(img));
 		for (y = 0; y < h && y < SGPU_CURSOR_SIZE; y++)
-			for (x = 0; x < b->w && x < SGPU_CURSOR_SIZE; x++) {
-				int pen = b->px[(y / d->scale) * b->stride + x];
+			for (x = 0; x < w && x < SGPU_CURSOR_SIZE; x++) {
+				int pen = b->px[(y / ky) * b->stride + x / kx];
 
 				if (pen != s->ptr_key)
 					img[y * SGPU_CURSOR_SIZE + x] = 0xff000000u | p->colours[pen];
 			}
+		p->cur_kx = kx;
+		p->cur_ky = ky;
 		if (sgpu_cursor_set(&p->s, img, SGPU_CURSOR_SIZE, SGPU_CURSOR_SIZE, SGPU_CURSOR_SIZE)) {
 			fprintf(stderr, "wbde: the hardware cursor went away\n");
 			return;
@@ -270,8 +303,8 @@ static void cursor_update(struct gpriv *p, struct disp *d, struct screen *s)
 		p->cur_shown = 1;
 		p->cur_x = p->cur_y = -10000;
 	}
-	x = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx;
-	y = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * d->scale;
+	x = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx * cur_kx(d);
+	y = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * cur_ky(d);
 	if (x != p->cur_x || y != p->cur_y) {
 		sgpu_cursor_move(&p->s, x, y);
 		p->cur_x = x;
@@ -464,7 +497,7 @@ static void build(struct gpriv *p, struct screen *s, const struct rect *d, int n
 	layers(p, s, d, nd, &p->pal, 1);
 	if (s->outline_on && (nx = outline_pieces(s, d, nd, x)) > 0)
 		layers(p, s, x, nx, &p->xpal, 0);
-	if (!p->cursor && s->ptr && !s->ptr_hidden)
+	if (!s->hw_pointer && s->ptr && !s->ptr_hidden)
 		layer(p, s->ptr, s->mx - s->ptr_hx, s->my - s->ptr_hy, d, nd, NULL, &p->pal,
 		      s->ptr_key);
 }
@@ -542,7 +575,17 @@ static void gpu_compose(struct disp *d, struct screen *s)
 			gtex_sync(p, &w->bm);
 	for (o = s->overlays; o; o = o->next)
 		gtex_sync(p, o->bm);
-	if (!p->cursor && s->ptr)
+	{
+		/* the hardware cursor while it can show the pointer at this
+		   screen's scale, else a layer */
+		int fits = cursor_fits(p, d, s);
+
+		if (fits != s->hw_pointer) {
+			s->hw_pointer = fits;
+			screen_damage_all(s);
+		}
+	}
+	if (!s->hw_pointer && s->ptr)
 		gtex_sync(p, s->ptr);
 	if (p->xormask != s->xormask)
 		xor_palette(p, s->xormask);
@@ -551,7 +594,12 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		p->clear = 1;
 		screen_damage_all(s);
 	}
-	if (p->cursor) {
+	if (p->cursor && !s->hw_pointer) {
+		if (p->cur_shown)
+			sgpu_cursor_hide(&p->s);
+		p->cur_shown = 0;
+		p->cur_bm = NULL;
+	} else if (p->cursor) {
 		struct timespec a, b;
 
 		clock_gettime(CLOCK_MONOTONIC, &a);
@@ -628,7 +676,7 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 	sgpu_readback_end(&p->s);
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	/* the CPU's composition of the same screen, through the same view, as the reference */
-	screen_compose(s, ref, &all, !p->cursor);
+	screen_compose(s, ref, &all, !s->hw_pointer);
 	for (y = 0; y < H; y++)
 		for (x = 0; x < W; x++) {
 			int sx, sy, in = disp_view_map(d, x, y, &sx, &sy);
@@ -646,15 +694,16 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 		"from the CPU's composition%s\n", W, H, us_between(&t0, &t1) / 1000, bad, total,
 		p->cursor ? " (pointer: hardware cursor, painted in)" : "");
 	/* the hardware cursor is not in the scan-out: paint it in for the eye */
-	if (p->cursor && s->ptr && !s->ptr_hidden) {
+	if (s->hw_pointer && s->ptr && !s->ptr_hidden) {
 		const struct bm *b = s->ptr;
-		int cx = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx;
-		int cy = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * d->scale;
+		int kx = cur_kx(d), ky = cur_ky(d);
+		int cx = d->view.ox + (int)(s->mx * d->view.sx) - s->ptr_hx * kx;
+		int cy = d->view.oy + (int)(s->my * d->view.sy) - s->ptr_hy * ky;
 
-		for (y = 0; y < b->h * d->scale; y++)
-			for (x = 0; x < b->w; x++) {
+		for (y = 0; y < b->h * ky; y++)
+			for (x = 0; x < b->w * kx; x++) {
 				int X = cx + x, Y = cy + y;
-				int pen = b->px[(y / d->scale) * b->stride + x];
+				int pen = b->px[(y / ky) * b->stride + x / kx];
 
 				if (pen != s->ptr_key && X >= 0 && Y >= 0 && X < W && Y < H)
 					img[(size_t)Y * W + X] = p->colours[pen];
@@ -855,11 +904,12 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	mh = (int)sgpu_height(&p->s);
 	p->mw = d->mw = mw;
 	p->mh = d->mh = mh;
+	/* Workbench's logical size, any; the view scales it (main.c) */
 	d->scale = 1;
 	p->lw = mw;
 	p->lh = mh;
-	if (size && sscanf(size, "%dx%d", &w, &h) == 2 && w == mw && h > 0 && mh % h == 0) {
-		d->scale = mh / h;
+	if (size && sscanf(size, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+		p->lw = w;
 		p->lh = h;
 	}
 	d->priv = p;
