@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ucontext.h>
 #include <unistd.h>
 
 #include "con.h"
@@ -38,6 +39,25 @@ static uint64_t now_ms(void)
 		return vclock;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+/* say where it died: the PC goes through addr2line on the unstripped build */
+static void on_crash(int sig, siginfo_t *si, void *ctx)
+{
+	char buf[128];
+	unsigned long pc = 0;
+	int n;
+
+#if defined(__m68k__)
+	pc = (unsigned long)((ucontext_t *)ctx)->uc_mcontext.gregs[16];
+#elif defined(__x86_64__)
+	pc = (unsigned long)((ucontext_t *)ctx)->uc_mcontext.gregs[REG_RIP];
+#endif
+	n = snprintf(buf, sizeof(buf), "wbde: signal %d at pc %08lx, address %p\n", sig, pc, si->si_addr);
+	if (write(2, buf, (size_t)n) < 0)
+		_exit(128 + sig);
+	signal(sig, SIG_DFL);
+	raise(sig);
 }
 
 static void on_signal(int sig)
@@ -303,6 +323,18 @@ int main(int argc, char **argv)
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 	signal(SIGPIPE, SIG_IGN);
+	if (!getenv("WBDE_NOCRASHHANDLER")) {
+		struct sigaction cs;
+
+		memset(&cs, 0, sizeof(cs));
+		cs.sa_sigaction = on_crash;
+		cs.sa_flags = SA_SIGINFO | SA_RESETHAND;
+		sigaction(SIGSEGV, &cs, NULL);
+		sigaction(SIGBUS, &cs, NULL);
+		sigaction(SIGILL, &cs, NULL);
+		sigaction(SIGFPE, &cs, NULL);
+		sigaction(SIGABRT, &cs, NULL);
+	}
 
 	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
 	memcpy(S.palette, ENV.pal, sizeof(S.palette));
