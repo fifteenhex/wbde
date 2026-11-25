@@ -1,0 +1,266 @@
+/*
+ * wbde: the screen, the event loop, and the glue between input, the window
+ * core, Workbench, console windows and clients.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <getopt.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "disp.h"
+#include "font.h"
+#include "menu.h"
+#include "prefs.h"
+#include "wm.h"
+
+static struct disp D;
+static struct screen S;
+static struct wbenv ENV;
+static volatile sig_atomic_t got_quit, got_shot;
+static uint64_t vclock;		/* scripted runs keep their own time */
+static int scripted;
+
+static uint64_t now_ms(void)
+{
+	struct timespec ts;
+
+	if (scripted)
+		return vclock;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static void on_signal(int sig)
+{
+	if (sig == SIGUSR1)
+		got_shot = 1;
+	else
+		got_quit = 1;
+}
+
+int disp_screenshot(const struct disp *d, const uint8_t pal[256][3], const char *path)
+{
+	FILE *f = fopen(path, "wb");
+	int x, y;
+
+	if (!f)
+		return -errno;
+	fprintf(f, "P6\n%d %d\n255\n", d->fb.w, d->fb.h * d->scale);
+	for (y = 0; y < d->fb.h * d->scale; y++)
+		for (x = 0; x < d->fb.w; x++)
+			fwrite(pal[d->fb.px[(y / d->scale) * d->fb.stride + x]], 3, 1, f);
+	fclose(f);
+	return 0;
+}
+
+static const struct menustrip *strip_for(struct screen *s)
+{
+	if (s->active && s->active->menus)
+		return s->active->menus;
+	return s->menus;
+}
+
+static void cb_motion(void *arg, int dx, int dy)
+{
+	struct screen *s = arg;
+	uint64_t now = now_ms();
+
+	wm_motion(s, s->mx + dx, s->my + dy, now);
+	if (menu_is_open())
+		menu_motion(s, s->mx, s->my);
+}
+
+static void cb_button(void *arg, int button, int down)
+{
+	struct screen *s = arg;
+	uint64_t now = now_ms();
+
+	if (button == 2) {
+		if (down && !menu_is_open() && !wm_busy(s)) {
+			struct win *w = win_at(s, s->mx, s->my);
+
+			if (w && (w->flags & WF_RMBTRAP)) {
+				wm_button(s, button, down, 0, now);
+				return;
+			}
+			menu_open(s, strip_for(s));
+		} else if (!down && menu_is_open()) {
+			menu_close(s);
+		} else if (!menu_is_open()) {
+			wm_button(s, button, down, 0, now);
+		}
+		return;
+	}
+	if (menu_is_open())
+		return;
+	wm_button(s, button, down, 0, now);
+}
+
+static void flush(void)
+{
+	if (ENV.paldirty) {
+		ENV.paldirty = 0;
+		memcpy(S.palette, ENV.pal, sizeof(S.palette));
+		disp_palette(&D, ENV.pal);
+	}
+	if (S.ndamage) {
+		screen_flush(&S, disp_touch, &D);
+		disp_present(&D);
+	}
+}
+
+static void shot(const char *path)
+{
+	flush();
+	if (disp_screenshot(&D, ENV.pal, path))
+		fprintf(stderr, "wbde: cannot write %s\n", path);
+	else
+		fprintf(stderr, "wbde: screenshot %s\n", path);
+}
+
+/*
+ * Scripts drive wbde without a mouse, for testing away from the machine:
+ *   move X Y | down B | up B | click X Y | dclick X Y | menu X Y X2 Y2 |
+ *   wait MS | shot FILE | quit
+ */
+static int run_script(const char *path)
+{
+	char line[512];
+	FILE *f = fopen(path, "r");
+
+	if (!f) {
+		perror(path);
+		return -1;
+	}
+	while (fgets(line, sizeof(line), f)) {
+		int a, b, c, d;
+		char arg[400];
+
+		vclock += 20;
+		if (sscanf(line, "move %d %d", &a, &b) == 2) {
+			cb_motion(&S, a - S.mx, b - S.my);
+		} else if (sscanf(line, "down %d", &a) == 1) {
+			cb_button(&S, a, 1);
+		} else if (sscanf(line, "up %d", &a) == 1) {
+			cb_button(&S, a, 0);
+		} else if (sscanf(line, "click %d %d", &a, &b) == 2) {
+			cb_motion(&S, a - S.mx, b - S.my);
+			cb_button(&S, 1, 1);
+			cb_button(&S, 1, 0);
+		} else if (sscanf(line, "dclick %d %d", &a, &b) == 2) {
+			cb_motion(&S, a - S.mx, b - S.my);
+			cb_button(&S, 1, 1);
+			cb_button(&S, 1, 0);
+			vclock += 100;
+			cb_button(&S, 1, 1);
+			cb_button(&S, 1, 0);
+		} else if (sscanf(line, "menu %d %d %d %d", &a, &b, &c, &d) == 4) {
+			cb_motion(&S, a - S.mx, b - S.my);
+			cb_button(&S, 2, 1);
+			cb_motion(&S, c - S.mx, d - S.my);
+			if (strstr(line, "hold")) {
+				flush();
+				continue;
+			}
+			cb_button(&S, 2, 0);
+		} else if (sscanf(line, "wait %d", &a) == 1) {
+			uint64_t until = vclock + (uint64_t)a;
+
+			while (vclock < until) {
+				vclock += 10;
+				wm_tick(&S, vclock);
+			}
+		} else if (sscanf(line, "shot %399s", arg) == 1) {
+			shot(arg);
+			continue;
+		} else if (!strncmp(line, "quit", 4)) {
+			break;
+		}
+		flush();
+	}
+	fclose(f);
+	return 0;
+}
+
+static void usage(void)
+{
+	fprintf(stderr,
+		"usage: wbde [--mode WxH] [--size WxH] [--sys DIR] [--rom FILE]\n"
+		"            [--script FILE]\n");
+}
+
+int main(int argc, char **argv)
+{
+	static const struct option opts[] = {
+		{ "mode", required_argument, NULL, 'm' },
+		{ "size", required_argument, NULL, 'z' },
+		{ "sys", required_argument, NULL, 's' },
+		{ "rom", required_argument, NULL, 'r' },
+		{ "script", required_argument, NULL, 'S' },
+		{ "help", no_argument, NULL, 'h' },
+		{ NULL, 0, NULL, 0 },
+	};
+	const char *mode = "640x480", *size = "640x240", *sys = "/mnt/sys", *script = NULL;
+	struct sigaction sa;
+	int o;
+
+	while ((o = getopt_long(argc, argv, "m:z:s:r:S:h", opts, NULL)) != -1) {
+		switch (o) {
+		case 'm': mode = optarg; break;
+		case 'z': size = optarg; break;
+		case 's': sys = optarg; break;
+		case 'r': setenv("WBDE_ROM", optarg, 1); break;
+		case 'S': script = optarg; break;
+		default: usage(); return o == 'h' ? 0 : 1;
+		}
+	}
+	scripted = script != NULL;
+
+	if (env_load(&ENV, sys)) {
+		fprintf(stderr, "wbde: no topaz: the Kickstart ROM could not be read\n");
+		return 1;
+	}
+	if (disp_open(&D, mode, size))
+		return 1;
+	env_logf(&ENV, "display: %s", D.desc);
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_signal;
+	sigaction(SIGUSR1, &sa, NULL);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	signal(SIGPIPE, SIG_IGN);
+
+	screen_init(&S, &D.fb, ENV.depth, ENV.screenfont);
+	memcpy(S.palette, ENV.pal, sizeof(S.palette));
+	S.mx = S.w / 2;
+	S.my = S.h / 2;
+	screen_set_pointer(&S, &ENV.pointer, ENV.ptr_hx, ENV.ptr_hy, 0);
+	ENV.paldirty = 1;
+	screen_damage_all(&S);
+	flush();
+
+	if (script) {
+		run_script(script);
+		disp_close(&D);
+		return 0;
+	}
+
+	while (!got_quit) {
+		poll(NULL, 0, 500);
+		wm_tick(&S, now_ms());
+		flush();
+		if (got_shot) {
+			got_shot = 0;
+			shot("/tmp/wbde-shot.ppm");
+		}
+	}
+	disp_close(&D);
+	return 0;
+}

@@ -1,2 +1,10 @@
 option('cpu', type: 'combo', choices: ['68040', '68060'], value: '68040',
        description: 'm68k CPU to compile for')
+option('soft', type: 'boolean', value: true,
+       description: 'the software display (smol2d on DRM); without it, only the memory display')
+option('smol2d', type: 'string', value: '../smol2d',
+       description: 'smol2d checkout (relative to the source directory)')
+option('smoldrm', type: 'string', value: '../smoldrm',
+       description: 'smoldrm checkout')
+option('smolinput', type: 'string', value: '../smolinput',
+       description: 'smolinput checkout')
