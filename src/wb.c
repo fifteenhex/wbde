@@ -142,6 +142,8 @@ static void view_free(struct iconview *v)
 {
 	int i;
 
+	if (WB)
+		WB->lasticon = NULL;
 	for (i = 0; i < v->n; i++) {
 		icon_free(&v->icons[i].ic);
 		free(v->icons[i].label);
@@ -417,7 +419,8 @@ static void drawer_scan(struct wb *wb, struct drawer *dr)
 		icon_label(wb, ic, e->d_name);
 	}
 	closedir(d);
-	qsort(dr->view.icons, (size_t)dr->view.n, sizeof(dr->view.icons[0]), name_cmp);
+	if (dr->view.n)
+		qsort(dr->view.icons, (size_t)dr->view.n, sizeof(dr->view.icons[0]), name_cmp);
 }
 
 /* --- selection --- */
@@ -602,7 +605,17 @@ static struct drawer *find_drawer_path(struct wb *wb, const char *path)
 
 static void drawer_free(struct wb *wb, struct drawer *d)
 {
-	struct drawer **p;
+	struct drawer **p, *o;
+
+	/* drawers opened from this one forget where they came from */
+	for (o = wb->drawers; o; o = o->next)
+		if (o->opener_view == &d->view)
+			o->opener_view = NULL;
+	if (wb->dragview == &d->view) {
+		wb->dragview = NULL;
+		wb->dragging = wb->lasso = 0;
+	}
+	wb->lasticon = NULL;
 
 	for (p = &wb->drawers; *p; p = &(*p)->next)
 		if (*p == d) {
