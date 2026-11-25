@@ -31,6 +31,8 @@
  * Everything here goes through smolgpu (sgpu.h); nothing knows which card.
  */
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -923,6 +925,46 @@ static void gpu_emergency(struct disp *d)
 		sgpu_cursor_hide(&p->s);
 }
 
+/*
+ * The monitor's physical size, from the connector the kernel reports
+ * (EDID): the first usable one that offers the mode we are showing.
+ * Asked on a file of our own, which needs no DRM master.
+ */
+static void monitor_mm(struct disp *d, int mw, int mh)
+{
+	struct drm_mode_card_res res = { 0 };
+	uint32_t conn_id;
+	unsigned int i, j;
+	int card = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+
+	if (card < 0)
+		return;
+	if (smoldrm_getresources(card, &res)) {
+		close(card);
+		return;
+	}
+	smoldrm_foreach_res_conn(i, &res, conn_id) {
+		struct drm_mode_get_connector conn = { 0 };
+		struct drm_mode_modeinfo *m;
+		int match = 0;
+
+		if (smoldrm_getconnector(card, conn_id, &conn))
+			continue;
+		if (smoldrm_connectorisusable(&conn)) {
+			smoldrm_foreach_conn_mode(j, &conn, m)
+				if (m->hdisplay == mw && m->vdisplay == mh)
+					match = 1;
+			if (match && !d->mm_w) {
+				d->mm_w = (int)conn.mm_width;
+				d->mm_h = (int)conn.mm_height;
+			}
+		}
+		smoldrm_cleanupconnector(&conn);
+	}
+	smoldrm_cleanupresources(&res);
+	close(card);
+}
+
 static int gpu_open(struct disp *d, const char *mode, const char *size)
 {
 	sgpu_config cfg = SGPU_CONFIG_DEFAULT;
@@ -964,6 +1006,7 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	mh = (int)sgpu_height(&p->s);
 	p->mw = d->mw = mw;
 	p->mh = d->mh = mh;
+	monitor_mm(d, mw, mh);
 	/* Workbench's logical size, any; the view scales it (main.c) */
 	d->scale = 1;
 	p->lw = mw;

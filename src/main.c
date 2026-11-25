@@ -154,6 +154,50 @@ static void layout(struct screen *s)
 	}
 }
 
+/*
+ * Workbench's logical size when none was given (GPU display): the native
+ * mode divided by a whole scale.  From the monitor's physical size where
+ * the connector reports one, for a Workbench pixel of about 0.45 mm (a
+ * classic Amiga or RTG monitor's, where topaz 8 reads comfortably);
+ * otherwise the largest scale that keeps 480 lines or more.  --scale (or
+ * WBDE_SCALE) alone gives native / scale.
+ */
+#define TARGET_PITCH_MM 0.45f
+
+static void auto_size(float asked)
+{
+	int k = 1, w, h;
+	float pitch = 0;
+
+	if (D.mm_w > 0 && D.mm_h > 0)
+		pitch = ((float)D.mm_w / D.mw + (float)D.mm_h / D.mh) / 2;
+	if (asked > 0) {
+		k = (int)asked;
+		env_logf(&ENV, "Workbench scale: %g, asked for", asked);
+	} else if (pitch >= 0.1f && pitch <= 1.5f) {
+		k = (int)(TARGET_PITCH_MM / pitch + 0.5f);
+		env_logf(&ENV, "monitor: %dx%d mm, %dx%d pixels, %.3f mm a pixel: Workbench scale %d "
+			 "(%.2f mm a Workbench pixel)", D.mm_w, D.mm_h, D.mw, D.mh, pitch,
+			 k < 1 ? 1 : k, pitch * (k < 1 ? 1 : k));
+	} else {
+		for (k = 1; D.mh / (k + 1) >= 480; k++)
+			;
+		env_logf(&ENV, "monitor: no usable physical size (%dx%d mm): Workbench scale %d, "
+			 "the largest that keeps 480 lines", D.mm_w, D.mm_h, k);
+	}
+	if (k < 1)
+		k = 1;
+	w = D.mw / k;
+	h = D.mh / k;
+	if (w == D.fb.w && h == D.fb.h)
+		return;
+	bm_free(&D.fb);
+	if (bm_alloc(&D.fb, w, h)) {
+		fprintf(stderr, "wbde: no memory for a %dx%d Workbench\n", w, h);
+		exit(1);
+	}
+}
+
 /* the largest whole scale at which a w x h screen fits the display */
 int screens_fit_scale(int w, int h)
 {
@@ -769,6 +813,8 @@ int main(int argc, char **argv)
 	if (disp_open(&D, display, mode, size))
 		return 1;
 	env_logf(&ENV, "display: %s", D.desc);
+	if (D.composes && !size)
+		auto_size(scale);
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_signal;

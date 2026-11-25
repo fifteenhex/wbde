@@ -86,6 +86,7 @@ struct disp {
 	int scale;		/* rows are shown this many times over */
 	int mw, mh;		/* the display mode */
 	int border_pen;		/* the software display's darkest pen, for the border */
+	int mm_w, mm_h;		/* the monitor's size in mm (EDID), 0 unknown */
 	struct disp_view view;
 	int composes;		/* ops->compose, not software composition */
 	int uniform;		/* Workbench at any size, scaled uniformly (as composing ones) */
