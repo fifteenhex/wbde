@@ -154,8 +154,24 @@ static void flush(void)
 		disp_palette(&D, ENV.pal);
 	}
 	if (S.ndamage) {
+		static int timing = -1;
+		struct timespec t0, t1, t2;
+		long area = 0;
+		int i;
+
+		if (timing < 0)
+			timing = getenv("WBDE_TIMING") != NULL;
+		for (i = 0; i < S.ndamage; i++)
+			area += (long)S.damage[i].w * S.damage[i].h;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
 		screen_flush(&S, disp_touch, &D);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
 		disp_present(&D);
+		clock_gettime(CLOCK_MONOTONIC, &t2);
+		if (timing)
+			fprintf(stderr, "wbde: flush %ld px: composite %ld us, present %ld us\n", area,
+				(long)((t1.tv_sec - t0.tv_sec) * 1000000 + (t1.tv_nsec - t0.tv_nsec) / 1000),
+				(long)((t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_nsec - t1.tv_nsec) / 1000));
 	}
 }
 

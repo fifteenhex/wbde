@@ -715,7 +715,16 @@ static struct drawer *open_drawer(struct wb *wb, const char *path, const char *t
 	d->next = wb->drawers;
 	wb->drawers = d;
 	busy(wb, 1);
-	drawer_scan(wb, d);
+	{
+		struct timespec t0, t1;
+
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		drawer_scan(wb, d);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		if (getenv("WBDE_TIMING"))
+			fprintf(stderr, "wbde: %s: %d icons read in %ld ms\n", path, d->view.n,
+				(long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
+	}
 	busy(wb, 0);
 	{
 		struct rect in;
