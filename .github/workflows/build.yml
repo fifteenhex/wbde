@@ -1,0 +1,104 @@
+name: build
+
+on: [push, pull_request]
+
+# wbde builds against the smol* libraries from source checkouts.  Where to
+# get them is set with repository variables (Settings > Secrets and
+# variables > Actions > Variables): <NAME>_URL is the git URL and <NAME>_REF
+# the commit or branch, which defaults to the commit below.
+env:
+  SMOLINPUT_URL: ${{ vars.SMOLINPUT_URL }}
+  SMOLINPUT_REF: ${{ vars.SMOLINPUT_REF || '30e0c0333bc9984a72e8ed5e0f8129cfa630982a' }}
+  SMOL2D_URL: ${{ vars.SMOL2D_URL }}
+  SMOL2D_REF: ${{ vars.SMOL2D_REF || 'fd287233118f0acf8f486d5e49690479874858da' }}
+  SMOLDRM_URL: ${{ vars.SMOLDRM_URL }}
+  SMOLDRM_REF: ${{ vars.SMOLDRM_REF || '838da147b48c4311ed0215f33be04fd22b60f18b' }}
+  SMOLGPU_URL: ${{ vars.SMOLGPU_URL }}
+  SMOLGPU_REF: ${{ vars.SMOLGPU_REF || '0632d0c58415b1e2b4196940dc6e84b0479d8c5f' }}
+  SMOLRDN_URL: ${{ vars.SMOLRDN_URL }}
+  SMOLRDN_REF: ${{ vars.SMOLRDN_REF || 'ef7087eea85f26a9659847903c4986a5732e24b4' }}
+
+jobs:
+  # Only the memory display, which needs smolinput alone: for the PC,
+  # and for the Amiga with Ubuntu's m68k cross toolchain
+  headless:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [host, m68k]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: wbde
+
+      # qemu-user provides qemu-m68k, the cross file's exe wrapper
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build gcc \
+            gcc-m68k-linux-gnu libc6-dev-m68k-cross qemu-user
+
+      - name: Fetch smolinput
+        run: wbde/.github/fetch-smol.sh smolinput
+
+      - name: Configure
+        run: |
+          cross=
+          if [ "${{ matrix.target }}" = m68k ]; then
+            m68k-linux-gnu-gcc --version
+            cross="--cross-file cross/m68k-linux-gnu.ini"
+          fi
+          cd wbde && meson setup $cross -Dgpu=none -Dsoft=false build
+
+      - name: Build
+        run: ninja -C wbde/build
+
+      - name: Upload the binaries
+        uses: actions/upload-artifact@v5
+        with:
+          name: wbde-headless-${{ matrix.target }}
+          path: |
+            wbde/build/wbde
+            wbde/build/wbrom
+            wbde/build/wbclient-demo
+
+  # What runs on an A4000: the GPU display (Radeon) and the software
+  # display.  Runs once SMOLGPU_URL is set, and needs every URL above.
+  amiga:
+    if: vars.SMOLGPU_URL != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: ['68040', '68060']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: wbde
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build \
+            gcc-m68k-linux-gnu libc6-dev-m68k-cross qemu-user
+
+      - name: Fetch the smol* libraries
+        run: wbde/.github/fetch-smol.sh smolinput smol2d smoldrm smolgpu smolrdn
+
+      - name: Configure
+        run: |
+          m68k-linux-gnu-gcc --version
+          cd wbde && meson setup --cross-file cross/m68k-linux-gnu.ini \
+            -Dcpu=${{ matrix.cpu }} build
+
+      - name: Build
+        run: ninja -C wbde/build
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: wbde-${{ matrix.cpu }}
+          path: wbde/build/wbde
