@@ -41,6 +41,9 @@ struct con {
 	char escbuf[40];
 	int esclen;
 	int scrolled;
+	/* a client's console (con_attach): who asked, and the id it knows it by */
+	void *owner;
+	uint32_t id;
 };
 
 static struct con *cons;
@@ -656,6 +659,78 @@ struct con *con_spawn(struct screen *s, const struct rect *r, const char *title,
 		return NULL;
 	}
 	return c;
+}
+
+/*
+ * A console window for a client of the protocol (WBP_OPEN_CON): the same
+ * terminal, but on an fd the client gave instead of a program's pty.  What
+ * wbde reads from the fd is shown, keys go back into it.  It closes when
+ * the client closes its end, and closing the window closes wbde's end, which
+ * is how the client hears of it.
+ */
+struct con *con_attach(struct screen *s, const struct rect *r, const char *title, int fd,
+		       void *owner, uint32_t id)
+{
+	struct con *c = calloc(1, sizeof(*c));
+
+	if (!c)
+		return NULL;
+	c->s = s;
+	c->r = *r;
+	c->fd = -1;
+	c->fg = s->pens[P_TEXT];
+	c->interactive = 1;		/* the fd ending closes the window */
+	c->owner = owner;
+	c->id = id;
+	snprintf(c->title, sizeof(c->title), "%s", title);
+	if (grid_alloc(c)) {
+		free(c);
+		return NULL;
+	}
+	c->fd = fd;
+	fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL));
+	fcntl(fd, F_SETFD, FD_CLOEXEC);
+	c->next = cons;
+	cons = c;
+	if (open_window(c)) {
+		con_free(c);		/* closes fd */
+		return NULL;
+	}
+	return c;
+}
+
+struct con *con_find(const void *owner, uint32_t id)
+{
+	struct con *c;
+
+	for (c = cons; c; c = c->next)
+		if (c->owner && c->owner == owner && c->id == id)
+			return c;
+	return NULL;
+}
+
+struct win *con_win(struct con *c)
+{
+	return c->w;
+}
+
+void con_destroy(struct con *c)
+{
+	if (c->w)
+		con_close(c->w);
+	else
+		con_free(c);
+}
+
+void con_drop_owner(const void *owner)
+{
+	struct con *c, *next;
+
+	for (c = cons; c; c = next) {
+		next = c->next;
+		if (c->owner && c->owner == owner)
+			con_destroy(c);
+	}
 }
 
 int con_pollfds(struct pollfd *fds, int max)

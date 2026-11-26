@@ -70,6 +70,8 @@ struct win_ops {
 	/* a scroller moved: w->vtop / w->htop changed */
 	void (*scrolled)(struct win *w);
 	void (*activate)(struct win *w, int active);
+	/* after a move or a size (after resized), with w->r the new place */
+	void (*changed)(struct win *w);
 };
 
 struct win {

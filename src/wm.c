@@ -875,6 +875,7 @@ void win_move_size(struct screen *s, struct win *w, const struct rect *nr)
 {
 	struct rect r = *nr;
 	int resized = r.w != w->r.w || r.h != w->r.h;
+	int moved;
 
 	clamp_size(w, &r);
 	damage_win(s, w);
@@ -886,6 +887,7 @@ void win_move_size(struct screen *s, struct win *w, const struct rect *nr)
 		bm_free(&w->bm);
 		w->bm = nb;
 	}
+	moved = r.x != w->r.x || r.y != w->r.y;
 	w->r = r;
 	if (resized) {
 		if (w->ops && w->ops->resized)
@@ -893,6 +895,8 @@ void win_move_size(struct screen *s, struct win *w, const struct rect *nr)
 		win_refresh(s, w);
 	}
 	damage_win(s, w);
+	if ((resized || moved) && w->ops && w->ops->changed)
+		w->ops->changed(w);
 }
 
 void win_set_scroll(struct screen *s, struct win *w, int vtotal, int vvis, int vtop,

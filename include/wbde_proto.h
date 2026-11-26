@@ -50,6 +50,8 @@ enum wbp_type {
 	/* several GPU buffers for one window, flipped between (see "Flips") */
 	WBP_ATTACH_BUFFER,	/* wbp_attach_buffer + a dma-buf fd -> WBP_ATTACHED */
 	WBP_PRESENT,		/* wbp_present -> WBP_PRESENTED, once shown and the last one released */
+	/* a console window wbde draws, on an fd the client gives (see "Console windows") */
+	WBP_OPEN_CON,		/* wbp_opencon + an fd -> WBP_CON_OPENED, win = the id */
 
 	/* server to client */
 	WBP_SCREEN = 64,	/* wbp_screen */
@@ -61,6 +63,7 @@ enum wbp_type {
 	WBP_ATTACHED,		/* (empty) the window shows the attached buffer */
 	WBP_SCREEN_OPENED,	/* wbp_screenbuf, with the screen buffer's fd */
 	WBP_PRESENTED,		/* wbp_presented */
+	WBP_CON_OPENED,		/* (empty) win = the console window's id */
 };
 
 struct wbp_hdr {
@@ -254,6 +257,21 @@ struct wbp_presented {
 	uint32_t usecs;			/* from WBP_PRESENT to the release */
 };
 
+/*
+ * WBP_OPEN_CON: a console window (what wbde's Shell and CON: windows are:
+ * VT100 enough for a shell, in the screen font and the Workbench pens) on
+ * the fd that comes with the message, a pty master or one end of a socket
+ * pair: wbde draws what it reads from it and writes the keys typed into the
+ * window to it.  The outer rectangle is in screen pixels; a width or height
+ * of 0 is wbde's choice (the screen's width, a third of its height).
+ */
+struct wbp_opencon {
+	int16_t left, top;
+	uint16_t width, height;
+	uint32_t flags;			/* none yet: 0 */
+	char title[80];
+};
+
 struct wbp_rect {
 	int16_t x, y;
 	uint16_t w, h;
@@ -267,7 +285,8 @@ struct wbp_rect {
 #define IDCMP_MENUPICK		0x00000100
 #define IDCMP_CLOSEWINDOW	0x00000200
 #define IDCMP_RAWKEY		0x00000400
-#define IDCMP_CHANGEWINDOW	0x02000000
+#define IDCMP_CHANGEWINDOW	0x02000000	/* moved or sized: mousex/mousey are
+						   the new outer left/top */
 #define IDCMP_ACTIVEWINDOW	0x00040000
 #define IDCMP_INACTIVEWINDOW	0x00080000
 #define IDCMP_VANILLAKEY	0x00200000

@@ -18,6 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "con.h"
 #include "disp.h"
 #include "font.h"
 #include "menu.h"
@@ -468,7 +469,18 @@ static void set_pointer(struct cwin *cw, const uint8_t *p, uint32_t len)
 		show_pointer(cw, 1);
 }
 
+/* Intuition's IDCMP_CHANGEWINDOW, with the new outer position (a client has
+   no Window->LeftEdge to read it from) */
+static void cw_changed(struct win *w)
+{
+	struct cwin *cw = w->priv;
+
+	if (cw->memfd >= 0)	/* not do_open's own placing */
+		send_event(cw, IDCMP_CHANGEWINDOW, 0, 0, w->r.x, w->r.y, 0);
+}
+
 static const struct win_ops cw_ops = {
+	.changed = cw_changed,
 	.draw = cw_draw,
 	.button = cw_button,
 	.motion = cw_motion,
@@ -1238,12 +1250,80 @@ static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h
 	send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
 }
 
+/*
+ * A console window on an fd the client gives: wbde's own terminal (con.c),
+ * on Workbench.  It lives in con.c's list, found again by (client, id).
+ */
+static void do_open_con(struct client *c, const struct wbp_hdr *h, const struct wbp_opencon *o)
+{
+	int fd = c->fd_in;
+	struct rect r;
+	char title[81];
+	uint32_t id;
+
+	c->fd_in = -1;
+	if (!o || fd < 0) {
+		if (fd >= 0)
+			close(fd);
+		send_error(c, h, EINVAL);
+		return;
+	}
+	memcpy(title, o->title, 80);
+	title[80] = 0;
+	r = rect_make(o->left, o->top, o->width ? o->width : S->w,
+		      o->height ? o->height : S->h / 3);
+	if (!o->width && !o->height && !o->left && !o->top)
+		r.y = S->barh;
+	id = next_id++;
+	if (!con_attach(S, &r, title, fd, c, id)) {	/* closes fd if it fails */
+		send_error(c, h, ENOMEM);
+		return;
+	}
+	send_msg(c, WBP_CON_OPENED, id, h->serial, NULL, 0, -1);
+}
+
 static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 {
 	int screen_msg = h->type >= WBP_OPEN_SCREEN && h->type <= WBP_SCREEN_FLAGS;
 	struct cwin *cw = h->win && !screen_msg ? find_win(c, h->win) : NULL;
 	struct cscreen *cs = h->win && screen_msg ? find_screen(c, h->win) : NULL;
+	struct con *cn = h->win && !cw && !cs ? con_find(c, h->win) : NULL;
 
+	if (cn) {
+		/* a console window of the client's: the few requests that make sense */
+		struct win *w = con_win(cn);
+
+		switch (h->type) {
+		case WBP_CLOSE:
+			con_destroy(cn);
+			break;
+		case WBP_SET_TITLE:
+			if (w) {
+				char t[96];
+				size_t n = h->len < sizeof(t) - 1 ? h->len : sizeof(t) - 1;
+
+				memcpy(t, p, n);
+				t[n] = 0;
+				win_set_title(S, w, t);
+			}
+			break;
+		case WBP_TO_FRONT:
+			if (w)
+				win_to_front(S, w);
+			break;
+		case WBP_TO_BACK:
+			if (w)
+				win_to_back(S, w);
+			break;
+		case WBP_ACTIVATE:
+			if (w)
+				win_activate(S, w);
+			break;
+		default:
+			send_error(c, h, EINVAL);
+		}
+		return;
+	}
 	if (h->win && !cw && !cs && h->type != WBP_HELLO && h->type != WBP_OPEN_SCREEN) {
 		send_error(c, h, ENOENT);
 		return;
@@ -1405,6 +1485,10 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 		do_present(c, cw, h, h->len >= sizeof(struct wbp_present) ?
 				    (const struct wbp_present *)p : NULL);
 		break;
+	case WBP_OPEN_CON:
+		do_open_con(c, h, h->len >= sizeof(struct wbp_opencon) ?
+				  (const struct wbp_opencon *)p : NULL);
+		break;
 	default:
 		send_error(c, h, ENOSYS);
 		break;
@@ -1419,6 +1503,7 @@ static void drop_client(int i)
 		destroy_win(c->wins);
 	while (c->screens)
 		destroy_screen(c->screens);
+	con_drop_owner(c);
 	if (c->fd_in >= 0)
 		close(c->fd_in);
 	close(c->fd);

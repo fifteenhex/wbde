@@ -182,6 +182,12 @@ static inline void wbc__other(struct wbc *c, const struct wbp_hdr *h, void *p, i
 
 	switch (h->type) {
 	case WBP_EVENT:
+		if (((const struct wbp_event *)p)->class == IDCMP_CHANGEWINDOW &&
+		    (w = wbc__find(c, h->win))) {
+			/* moved or sized: the event says where to */
+			w->left = ((const struct wbp_event *)p)->mousex;
+			w->top = ((const struct wbp_event *)p)->mousey;
+		}
 		if (c->npending < 64) {
 			memcpy(&c->pending[c->npending], p, sizeof(struct wbp_event));
 			c->pending_win[c->npending++] = h->win;
@@ -349,6 +355,61 @@ static inline int wbc_close(struct wbc *c, struct wbc_window *w)
 static inline int wbc_set_menus(struct wbc *c, struct wbc_window *w, const struct wbp_menuitem *m, int n)
 {
 	return wbc__send(c, WBP_SET_MENUS, w->id, m, (uint32_t)(n * (int)sizeof(*m)));
+}
+
+/* outer position (w->left/top keep it current if IDCMP_CHANGEWINDOW was asked
+   for) and inner size, as wbc_open's */
+static inline int wbc_move_size(struct wbc *c, struct wbc_window *w, int left, int top, int width,
+				int height)
+{
+	struct wbp_rect r = { (int16_t)left, (int16_t)top, (uint16_t)width, (uint16_t)height };
+
+	return wbc__send(c, WBP_MOVE_SIZE, w->id, &r, sizeof(r));
+}
+
+/*
+ * A console window drawn by wbde (see "Console windows" in
+ * client-protocol.md) on `fd`: one end of a socketpair or a pty master,
+ * which wbde gets a copy of (close yours of that end).  What is written to
+ * the other end is shown, keys typed come out of it, and it reads end of
+ * file when the user closes the window.  0 with *id set, or -errno.
+ * wbc_close_con(), and WBP_SET_TITLE/TO_FRONT/ACTIVATE with that id.
+ */
+static inline int wbc_open_con(struct wbc *c, int fd, int left, int top, int width, int height,
+			       const char *title, uint32_t *id)
+{
+	struct wbp_opencon o;
+	struct wbp_hdr h;
+	void *pl;
+	int rfd;
+
+	memset(&o, 0, sizeof(o));
+	o.left = (int16_t)left;
+	o.top = (int16_t)top;
+	o.width = (uint16_t)width;
+	o.height = (uint16_t)height;
+	strncpy(o.title, title, sizeof(o.title) - 1);
+	if (wbc__send_fd(c, WBP_OPEN_CON, 0, &o, sizeof(o), fd))
+		return -1;
+	for (;;) {
+		if (wbc__recv(c, &h, &pl, &rfd) <= 0)
+			return -1;
+		if (h.serial == c->serial && (h.type == WBP_CON_OPENED || h.type == WBP_ERROR)) {
+			int ret = h.type == WBP_ERROR ? *(int32_t *)pl : 0;
+
+			if (!ret)
+				*id = h.win;
+			wbc__consume(c, &h);
+			return ret;
+		}
+		wbc__other(c, &h, pl, rfd);
+		wbc__consume(c, &h);
+	}
+}
+
+static inline int wbc_close_con(struct wbc *c, uint32_t id)
+{
+	return wbc__send(c, WBP_CLOSE, id, NULL, 0);
 }
 
 static inline int wbc_set_title(struct wbc *c, struct wbc_window *w, const char *t)

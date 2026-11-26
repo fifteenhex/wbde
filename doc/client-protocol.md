@@ -64,6 +64,7 @@ both ends are on the same machine.  A request that fails is answered with
 | `WBP_GET_FONT` | - | `WBP_FONT` |
 | `WBP_ATTACH` | `wbp_attach` + a dma-buf fd (none: detach) | `WBP_ATTACHED` (see GPU buffers) |
 | `WBP_ATTACH_BUFFER`, `WBP_PRESENT` | several buffers and which shows | see Flips |
+| `WBP_OPEN_CON` | `wbp_opencon` + an fd | `WBP_CON_OPENED`, `win` = its id (see Console windows) |
 
 `wbp_open` gives the outer position, the inner size and its limits, the
 `WBP_WF_*` flags (the Intuition window flags a client can have: `CLOSE`,
@@ -107,6 +108,12 @@ Events sent, when the client asked for the class:
 | `IDCMP_NEWSIZE` | after a resize, after the new `WBP_WINDOW` | 0 |
 | `IDCMP_MENUPICK` | a menu item chosen | the item's id |
 | `IDCMP_ACTIVEWINDOW`, `IDCMP_INACTIVEWINDOW` | activation | 0 |
+| `IDCMP_CHANGEWINDOW` | after the window moved or was sized (by the user, or `WBP_MOVE_SIZE`) | 0; `mousex/mousey` are the new outer left and top in screen pixels |
+
+A client has no `Window->LeftEdge` to read, so `IDCMP_CHANGEWINDOW` carries
+the position itself; `wbclient.h` keeps `w->left` and `w->top` up to date from it,
+which is what a client needs to resize with `WBP_MOVE_SIZE` (it takes the
+outer position too) without moving the window back to where it opened.
 
 As in Intuition, the qualifier carries the mouse buttons held.
 
@@ -324,6 +331,39 @@ followed by width x height pens (0 transparent; an Amiga sprite's colours
 are pens 17, 18 and 19) gives the window its own pointer, shown while it
 is the active window, as Intuition's `SetPointer()` does.  A bare
 `uint32_t` kind is enough for `WBP_PTR_NORMAL` and `WBP_PTR_BUSY`.
+
+## Console windows
+
+wbde's Shell and CON: windows are a terminal it draws itself: VT100
+enough for a shell (line editing, clearing, colours as Workbench pens), in
+the screen font, with keys typed into it sent as a terminal sends them
+(Return is `\r`, the cursor keys `ESC [ A` and so on).  A client can have
+one on an fd of its own, for whatever it wants to talk to (a serial line,
+a program it runs, a card's console) without drawing text itself.
+
+| message | payload | answer |
+|---|---|---|
+| `WBP_OPEN_CON` | `wbp_opencon { left, top, width, height, flags, title }` + an fd | `WBP_CON_OPENED`, `win` = the console's id |
+
+- The fd is a pty master or one end of a `socketpair()`: wbde reads what
+  to show from it and writes the keys to it.  Close your copy of the end
+  you sent and keep the other.
+- The rectangle is outer, in screen pixels, on Workbench; a width or
+  height of 0 is wbde's choice (with all four 0: the screen's width and a
+  third of its height, under the title bar).  `flags` is 0.
+- `\n` only moves down, as on a terminal: send `\r\n` for a new line (a
+  pty's `ONLCR` does that for a program; a client writing to a socket does
+  it itself).
+- It goes when either side lets go: the client closing its end, or
+  `WBP_CLOSE` with the id, closes the window, and the user closing the
+  window closes wbde's end, so that the client reads end of file.  It
+  goes too when the client disconnects.
+- `WBP_SET_TITLE`, `WBP_TO_FRONT`, `WBP_TO_BACK` and `WBP_ACTIVATE` take
+  the id as they take a window's.  It sends no events: the keys are on
+  the fd, and while it is active the menus are Workbench's.
+- There is no scrollback: what scrolls off the top is gone, as in wbde's
+  Shell.
+- `wbclient.h` has `wbc_open_con()` and `wbc_close_con()`.
 
 ## Not provided
 
