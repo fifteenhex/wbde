@@ -47,6 +47,9 @@ enum wbp_type {
 	WBP_SCREEN_TITLE,	/* int32_t showtitle (-1: unchanged), then the title */
 	WBP_SCREEN_MENUS,	/* wbp_menuitem[]: the menus of the screen's own pixels */
 	WBP_SCREEN_FLAGS,	/* uint32_t WBP_SCF_* */
+	/* several GPU buffers for one window, flipped between (see "Flips") */
+	WBP_ATTACH_BUFFER,	/* wbp_attach_buffer + a dma-buf fd -> WBP_ATTACHED */
+	WBP_PRESENT,		/* wbp_present -> WBP_PRESENTED, once shown and the last one released */
 
 	/* server to client */
 	WBP_SCREEN = 64,	/* wbp_screen */
@@ -57,6 +60,7 @@ enum wbp_type {
 	WBP_ERROR,		/* int32_t -errno for the request with this serial */
 	WBP_ATTACHED,		/* (empty) the window shows the attached buffer */
 	WBP_SCREEN_OPENED,	/* wbp_screenbuf, with the screen buffer's fd */
+	WBP_PRESENTED,		/* wbp_presented */
 };
 
 struct wbp_hdr {
@@ -217,6 +221,37 @@ struct wbp_attach {
 	uint32_t pitch;			/* bytes a row (the card's alignment: 256 pixels
 					   for pens, 64 for XRGB8888) */
 	uint32_t offset;		/* of pixel 0,0 in the buffer, 256-aligned */
+};
+
+/*
+ * Flips: a window may have up to WBP_MAX_BUFFERS attached buffers (each a
+ * dma-buf with its own format, size, pitch and offset: several may be one
+ * buffer object at different offsets) and show one at a time.
+ * WBP_PRESENT shows `slot` from the next composite on.  WBP_PRESENTED
+ * answers it (same cookie) once a composite showing it has been sent to the
+ * GPU and the GPU has finished reading the buffer shown before it
+ * (`released`, -1 if there was none or it was the same): from then on the
+ * client may draw into `released` again, and a client that draws only into
+ * released buffers never has a frame read while it is half drawn.  With
+ * three buffers neither side waits for the other in the steady state.
+ */
+#define WBP_MAX_BUFFERS		8
+
+struct wbp_attach_buffer {
+	struct wbp_attach a;
+	uint32_t slot;			/* 0 .. WBP_MAX_BUFFERS-1 */
+};
+
+struct wbp_present {
+	uint32_t slot;
+	uint32_t cookie;		/* the client's, echoed in WBP_PRESENTED */
+};
+
+struct wbp_presented {
+	uint32_t slot;			/* now shown */
+	uint32_t cookie;
+	int32_t released;		/* the slot the client may draw into again, -1 none */
+	uint32_t usecs;			/* from WBP_PRESENT to the release */
 };
 
 struct wbp_rect {

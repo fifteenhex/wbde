@@ -63,6 +63,7 @@ both ends are on the same machine.  A request that fails is answered with
 | `WBP_OBTAIN_PEN` | `uint8_t rgb[3]` | `WBP_PEN`: `uint32_t` pen |
 | `WBP_GET_FONT` | - | `WBP_FONT` |
 | `WBP_ATTACH` | `wbp_attach` + a dma-buf fd (none: detach) | `WBP_ATTACHED` (see GPU buffers) |
+| `WBP_ATTACH_BUFFER`, `WBP_PRESENT` | several buffers and which shows | see Flips |
 
 `wbp_open` gives the outer position, the inner size and its limits, the
 `WBP_WF_*` flags (the Intuition window flags a client can have: `CLOSE`,
@@ -179,6 +180,43 @@ inner area is redrawn from it.  The buffer must be on the same card: a
 GEM object exported with `DRM_IOCTL_PRIME_HANDLE_TO_FD`, for example from
 the render node, or a frame that another card writes into VRAM over PCI.
 `wbclient.h` has `wbc_attach()`.
+
+## Flips
+
+`WBP_ATTACH` shows one buffer, which the client (or a card on the bus)
+overwrites while the GPU may be reading it, so frames can tear and wbde
+cannot tell a whole frame from a half drawn one.  With flips a window has
+several buffers and shows one at a time.  GPU display only.
+
+| message | payload | answer |
+|---|---|---|
+| `WBP_ATTACH_BUFFER` | `wbp_attach_buffer` (`wbp_attach` and a `slot`) + a dma-buf fd | `WBP_ATTACHED` |
+| `WBP_PRESENT` | `wbp_present { slot, cookie }` | later, `WBP_PRESENTED` |
+
+- There are up to `WBP_MAX_BUFFERS` (8) slots, each with its own dma-buf,
+  format, size, pitch and offset; several may be one buffer object at
+  different offsets.  Attaching a slot again replaces it, and `WBP_ATTACH`
+  with no fd drops every slot.
+- `WBP_PRESENT` shows `slot` from the next composite on (the whole inner
+  area is redrawn).
+- `WBP_PRESENTED { slot, cookie, released, usecs }` answers it once a
+  composite showing `slot` has been sent to the GPU and the GPU has
+  finished reading the buffer shown before (`released`, -1 if there was
+  none or it was the same slot).  The client may draw into `released` from
+  then on, so a client that draws only into released buffers never has a
+  half drawn frame on the screen.  `usecs` is the time from the present to
+  the answer.  Answers come in order, so each also releases every buffer
+  before it.
+- wbde keeps a duplicate of each slot's dma-buf and polls it for
+  `POLLOUT`, which a dma-buf reports once every fence on it (the command
+  streams that read it) has signalled.  Slots that are one buffer object
+  share its fences, so the answer can come a composite later than it
+  needs to.
+- With three buffers neither side waits for the other in the steady
+  state; with two, the client waits for the answer before drawing.
+- `wbclient.h` has `wbc_attach_buffer()`, `wbc_present()`, and
+  `wbc_presented()` to take the answers (`wbc_wait()` returns 0 when one
+  arrives).
 
 ## Unscaled content
 

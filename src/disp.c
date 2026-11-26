@@ -117,6 +117,16 @@ int disp_share(struct disp *d, struct win *w, int format, int width, int height,
 	return d->ops->share(d, w, format, width, height, fd, b, size);
 }
 
+int disp_attach_slot(struct disp *d, struct win *w, int slot, int fd, const struct disp_buf *b)
+{
+	return d && d->ops->attach_slot ? d->ops->attach_slot(d, w, slot, fd, b) : -ENOTSUP;
+}
+
+int disp_show_slot(struct disp *d, struct win *w, int slot)
+{
+	return d && d->ops->show_slot ? d->ops->show_slot(d, w, slot) : -ENOTSUP;
+}
+
 void disp_detach(struct disp *d, struct win *w)
 {
 	if (d && d->ops->detach)

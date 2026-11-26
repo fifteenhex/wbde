@@ -37,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #include <sgpu.h>
 
@@ -61,12 +62,49 @@ struct gtex {
 	uint8_t *shadow;		/* bm->stride a row, like the bitmap */
 };
 
-/* a window's shared content (win->ext) */
+/*
+ * A window's shared content (win->ext): a texture of its own (WBP_ATTACH,
+ * WBP_WF_VRAM), or slots of them flipped between (WBP_ATTACH_BUFFER and
+ * WBP_PRESENT), cur the one shown.
+ */
+#define EXT_SLOTS	8
+
+/*
+ * Imports of one dma-buf share one GEM handle (the kernel gives the handle
+ * it already has for that buffer), so freeing one of them closes the
+ * handle under all the others: the next command stream names a handle that
+ * is gone and the GPU display fails.  Slots are typically one buffer
+ * object at several offsets, so
+ * each import counts against its dma-buf, and the textures are freed when
+ * the last one goes.
+ */
+struct imp {
+	struct imp *next;
+	dev_t dev;
+	ino_t ino;
+	int refs;
+	struct ext *retired;		/* freed by the program, the handle still shared */
+};
+
+static struct imp *imports;
+
 struct ext {
 	sgpu_tex t;
+	int has_tex;
+	struct imp *imp;		/* imported: its dma-buf's count */
+	struct ext *rnext;
 	int format;			/* DISP_BUF_* */
 	int w, h;
+	struct ext *slot[EXT_SLOTS];
+	int cur;			/* -1: t */
 };
+
+static struct ext *ext_cur(struct ext *e)
+{
+	if (e && e->cur >= 0 && e->cur < EXT_SLOTS && e->slot[e->cur])
+		e = e->slot[e->cur];
+	return e && e->has_tex ? e : NULL;
+}
 
 enum { PROG_PAL, PROG_BLIT };
 
@@ -193,14 +231,46 @@ static struct gtex *gtex_sync(struct gpriv *p, struct bm *bm)
 	return g;
 }
 
+static void ext_free_one(struct ext *e)
+{
+	struct imp *g, **pg;
+	int i;
+
+	if (!e)
+		return;
+	for (i = 0; i < EXT_SLOTS; i++)
+		ext_free_one(e->slot[i]);
+	g = e->imp;
+	if (g && --g->refs > 0) {
+		e->rnext = g->retired;		/* not yet: others use the handle */
+		g->retired = e;
+		return;
+	}
+	if (e->has_tex)
+		sgpu_tex_free(&G->s, &e->t);
+	free(e);
+	if (!g)
+		return;
+	while (g->retired) {
+		struct ext *r = g->retired;
+
+		g->retired = r->rnext;
+		sgpu_tex_free(&G->s, &r->t);
+		free(r);
+	}
+	for (pg = &imports; *pg; pg = &(*pg)->next)
+		if (*pg == g) {
+			*pg = g->next;
+			break;
+		}
+	free(g);
+}
+
 static void ext_free(struct win *w)
 {
-	struct ext *e = w->ext;
-
-	if (!e || !G)
+	if (!w->ext || !G)
 		return;
-	sgpu_tex_free(&G->s, &e->t);
-	free(e);
+	ext_free_one(w->ext);
 	w->ext = NULL;
 }
 
@@ -409,10 +479,9 @@ static void layer(struct gpriv *p, struct bm *bm, int x, int y, const struct rec
 }
 
 /* a window's shared content over its inner area, scaled to fit */
-static void ext_layer(struct gpriv *p, struct win *w, const struct rect *rects, int n,
-		      const signed char *skip, const sgpu_tex *pal)
+static void ext_layer(struct gpriv *p, struct win *w, struct ext *e, const struct rect *rects,
+		      int n, const signed char *skip, const sgpu_tex *pal)
 {
-	struct ext *e = w->ext;
 	struct rect in, c;
 	float sx, sy;
 	int i;
@@ -487,7 +556,7 @@ static void content_layer(struct gpriv *p, struct screen *s, struct win *w, cons
 static void win_content(struct gpriv *p, struct screen *s, struct win *w, const struct rect *r,
 			int n, const signed char *skip, const sgpu_tex *pal)
 {
-	struct ext *e = w->ext;
+	struct ext *e = ext_cur(w->ext);
 
 	if (w->unscaled && e)
 		content_layer(p, s, w, &e->t, e->w, e->h,
@@ -497,7 +566,7 @@ static void win_content(struct gpriv *p, struct screen *s, struct win *w, const 
 
 		content_layer(p, s, w, &g->t, g->w, g->h, PROG_PAL, pal, r, n, skip);
 	} else if (e)
-		ext_layer(p, w, r, n, skip, pal);
+		ext_layer(p, w, e, r, n, skip, pal);
 }
 
 /*
@@ -888,9 +957,63 @@ static int gpu_shot(struct disp *d, struct screen *s, const char *path)
 /* shared buffers as window content                                    */
 /* ------------------------------------------------------------------ */
 
+static struct ext *ext_import(struct gpriv *p, int fd, const struct disp_buf *b, int *err);
+
 static int gpu_attach(struct disp *d, struct win *w, int fd, const struct disp_buf *b)
 {
-	struct gpriv *p = d->priv;
+	struct ext *e;
+	int ret;
+
+	e = ext_import(d->priv, fd, b, &ret);
+	if (!e)
+		return ret;
+	if (w->ext)
+		ext_free(w);
+	w->ext = e;
+	return 0;
+}
+
+/* flips: slot k of the window's buffers; nothing shows until gpu_present */
+static int gpu_attach_slot(struct disp *d, struct win *w, int slot, int fd,
+			   const struct disp_buf *b)
+{
+	struct ext *head = w->ext, *e;
+	int ret;
+
+	if (slot < 0 || slot >= EXT_SLOTS)
+		return -EINVAL;
+	if (head && head->has_tex) {		/* a single buffer before: gone */
+		ext_free(w);
+		head = NULL;
+	}
+	if (!head) {
+		head = calloc(1, sizeof(*head));
+		if (!head)
+			return -ENOMEM;
+		head->cur = -1;
+		w->ext = head;
+	}
+	e = ext_import(d->priv, fd, b, &ret);
+	if (!e)
+		return ret;
+	ext_free_one(head->slot[slot]);
+	head->slot[slot] = e;
+	return 0;
+}
+
+static int gpu_present(struct disp *d, struct win *w, int slot)
+{
+	struct ext *head = w->ext;
+
+	(void)d;
+	if (!head || slot < 0 || slot >= EXT_SLOTS || !head->slot[slot])
+		return -EINVAL;
+	head->cur = slot;
+	return 0;
+}
+
+static struct ext *ext_import(struct gpriv *p, int fd, const struct disp_buf *b, int *err)
+{
 	struct ext *e;
 	unsigned int fmt, bpp;
 	int ret;
@@ -902,27 +1025,51 @@ static int gpu_attach(struct disp *d, struct win *w, int fd, const struct disp_b
 		fmt = SGPU_TEX_XRGB8;
 		bpp = 4;
 	} else {
-		return -EINVAL;
+		*err = -EINVAL;
+		return NULL;
 	}
-	if (b->pitch % bpp || b->width <= 0 || b->height <= 0)
-		return -EINVAL;
+	if (b->pitch % bpp || b->width <= 0 || b->height <= 0) {
+		*err = -EINVAL;
+		return NULL;
+	}
 	e = calloc(1, sizeof(*e));
-	if (!e)
-		return -ENOMEM;
+	if (!e) {
+		*err = -ENOMEM;
+		return NULL;
+	}
 	ret = sgpu_tex_import(&p->s, &e->t, fd, (unsigned)b->width, (unsigned)b->height, fmt,
 			      (unsigned)b->pitch / bpp, b->offset);
 	if (ret) {
 		free(e);
-		return ret;
+		*err = ret;
+		return NULL;
 	}
 	sgpu_tex_filter(&e->t, getenv("WBDE_GPU_SMOOTH") != NULL, true);
+	{
+		struct stat st;
+		struct imp *g = NULL;
+
+		if (!fstat(fd, &st)) {
+			for (g = imports; g; g = g->next)
+				if (g->dev == st.st_dev && g->ino == st.st_ino)
+					break;
+			if (!g && (g = calloc(1, sizeof(*g)))) {
+				g->dev = st.st_dev;
+				g->ino = st.st_ino;
+				g->next = imports;
+				imports = g;
+			}
+		}
+		if (g)
+			g->refs++;
+		e->imp = g;
+	}
+	e->has_tex = 1;
+	e->cur = -1;
 	e->format = b->format;
 	e->w = b->width;
 	e->h = b->height;
-	if (w->ext)
-		ext_free(w);
-	w->ext = e;
-	return 0;
+	return e;
 }
 
 static void gpu_detach(struct disp *d, struct win *w)
@@ -969,6 +1116,8 @@ static int gpu_share(struct disp *d, struct win *w, int format, int width, int h
 					    (unsigned)width);
 		free(zero);
 	}
+	e->has_tex = 1;
+	e->cur = -1;
 	e->format = DISP_BUF_PENS;
 	e->w = width;
 	e->h = height;
@@ -1175,4 +1324,6 @@ const struct disp_ops disp_gpu_ops = {
 	.attach = gpu_attach,
 	.detach = gpu_detach,
 	.share = gpu_share,
+	.attach_slot = gpu_attach_slot,
+	.show_slot = gpu_present,
 };

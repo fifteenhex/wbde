@@ -59,6 +59,9 @@ struct wbc {
 	struct wbp_event pending[64];
 	uint32_t pending_win[64];
 	int npending;
+	struct wbp_presented presented[16];	/* WBP_PRESENTED not taken yet */
+	uint32_t presented_win[16];
+	int npresented;
 };
 
 static inline int wbc__send_fd(struct wbc *c, uint32_t type, uint32_t win, const void *p,
@@ -193,6 +196,12 @@ static inline void wbc__other(struct wbc *c, const struct wbp_hdr *h, void *p, i
 		break;
 	case WBP_SCREEN:
 		memcpy(&c->screen, p, sizeof(c->screen));
+		break;
+	case WBP_PRESENTED:
+		if (c->npresented < 16 && h->len >= sizeof(struct wbp_presented)) {
+			memcpy(&c->presented[c->npresented], p, sizeof(struct wbp_presented));
+			c->presented_win[c->npresented++] = h->win;
+		}
 		break;
 	default:
 		if (fd >= 0)
@@ -404,7 +413,8 @@ static inline int wbc_text(struct wbc *c, struct wbc_window *w, int x, int y, co
 
 /*
  * The next event, for any window (*win gets its id). timeout in ms, -1 to
- * wait. 1 event, 0 timeout, -1 disconnected.
+ * wait. 1 event, 0 timeout (or a WBP_PRESENTED came: wbc_presented()), -1
+ * disconnected.
  */
 static inline int wbc_wait(struct wbc *c, struct wbp_event *e, uint32_t *win, int timeout)
 {
@@ -428,7 +438,62 @@ static inline int wbc_wait(struct wbc *c, struct wbp_event *e, uint32_t *win, in
 			return -1;
 		wbc__other(c, &h, pl, fd);
 		wbc__consume(c, &h);
+		if (c->npresented && !c->npending)
+			return 0;
 	}
+}
+
+/*
+ * Flips (see "Flips" in client-protocol.md): attach a GPU buffer as slot
+ * `slot` of w (fd is the caller's to keep), show a slot, and take the
+ * answers: wbc_presented() gives the next WBP_PRESENTED (1), or 0 if none
+ * has come yet.
+ */
+static inline int wbc_attach_buffer(struct wbc *c, struct wbc_window *w, int slot, int fd,
+				    uint32_t format, int width, int height, uint32_t pitch,
+				    uint32_t offset)
+{
+	struct wbp_attach_buffer a = { { format, (uint16_t)width, (uint16_t)height, pitch, offset },
+				       (uint32_t)slot };
+	struct wbp_hdr h;
+	void *pl;
+	int rfd;
+
+	if (wbc__send_fd(c, WBP_ATTACH_BUFFER, w->id, &a, sizeof(a), fd))
+		return -1;
+	for (;;) {
+		if (wbc__recv(c, &h, &pl, &rfd) <= 0)
+			return -1;
+		if (h.serial == c->serial && (h.type == WBP_ATTACHED || h.type == WBP_ERROR)) {
+			int ret = h.type == WBP_ERROR ? *(int32_t *)pl : 0;
+
+			wbc__consume(c, &h);
+			return ret;
+		}
+		wbc__other(c, &h, pl, rfd);
+		wbc__consume(c, &h);
+	}
+}
+
+static inline int wbc_present(struct wbc *c, struct wbc_window *w, int slot, uint32_t cookie)
+{
+	struct wbp_present p = { (uint32_t)slot, cookie };
+
+	return wbc__send(c, WBP_PRESENT, w->id, &p, sizeof(p));
+}
+
+static inline int wbc_presented(struct wbc *c, struct wbp_presented *out, uint32_t *win)
+{
+	if (!c->npresented)
+		return 0;
+	*out = c->presented[0];
+	if (win)
+		*win = c->presented_win[0];
+	c->npresented--;
+	memmove(c->presented, c->presented + 1, sizeof(c->presented[0]) * (size_t)c->npresented);
+	memmove(c->presented_win, c->presented_win + 1,
+		sizeof(c->presented_win[0]) * (size_t)c->npresented);
+	return 1;
 }
 
 #endif

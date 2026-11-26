@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "disp.h"
@@ -44,6 +45,17 @@ struct cwin {
 	int unscaled;		/* the content in display pixels, 1:1 (WBP_WF_UNSCALED) */
 	struct bm cbm;		/* unscaled, in RAM: what the display shows of it */
 	int want_w, want_h;	/* unscaled: the content size asked for, 0 none */
+	/* flips: the attached buffers (our dup of each dma-buf, -1 none), the
+	   one shown, and presents not answered yet, oldest first */
+	int slotfd[WBP_MAX_BUFFERS];
+	int cur_slot;
+	struct pend {
+		int slot, old;
+		uint32_t cookie;
+		int composed;	/* a composite since: the old one is no longer drawn */
+		struct timespec t;
+	} pend[WBP_MAX_BUFFERS];
+	int npend;
 	uint32_t idcmp;
 	/* its pointer, while it is the active window */
 	int ptr_kind;		/* WBP_PTR_* */
@@ -578,6 +590,13 @@ static void destroy_win(struct cwin *cw)
 	if (cw->w)
 		win_close(cw->scr, cw->w);	/* and the display's content with it */
 	cw->w = NULL;
+	{
+		int i;
+
+		for (i = 0; i < WBP_MAX_BUFFERS; i++)
+			if (cw->slotfd[i] >= 0)
+				close(cw->slotfd[i]);
+	}
 	bm_free(&cw->cbm);
 	bm_free(&cw->ptr);
 	free_menus(cw);
@@ -889,6 +908,9 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	cw->c = c;
 	cw->id = next_id++;
 	cw->memfd = -1;
+	cw->cur_slot = -1;
+	for (iw = 0; iw < WBP_MAX_BUFFERS; iw++)
+		cw->slotfd[iw] = -1;
 	cw->scr = S;
 	if (h->len >= sizeof(struct wbp_open) && o->screen) {
 		struct cscreen *cs = find_screen(c, o->screen);
@@ -1015,6 +1037,135 @@ static void do_damage(struct cwin *cw, const struct wbp_rect *r)
 	screen_damage(cw->scr, &d);
 }
 
+/* --- flips --- */
+
+static void drop_slots(struct cwin *cw)
+{
+	int i;
+
+	for (i = 0; i < WBP_MAX_BUFFERS; i++)
+		if (cw->slotfd[i] >= 0) {
+			close(cw->slotfd[i]);
+			cw->slotfd[i] = -1;
+		}
+	cw->cur_slot = -1;
+	cw->npend = 0;
+}
+
+static long us_since(const struct timespec *t)
+{
+	struct timespec n;
+
+	clock_gettime(CLOCK_MONOTONIC, &n);
+	return (long)((n.tv_sec - t->tv_sec) * 1000000 + (n.tv_nsec - t->tv_nsec) / 1000);
+}
+
+/*
+ * Answer the presents whose buffer has been composed and whose predecessor
+ * the GPU has finished reading: a dma-buf polls writable once every fence
+ * on it (the composites that read it) has signalled.  In order: an answer
+ * says every earlier buffer is free as well.
+ */
+static void check_presents(struct cwin *cw)
+{
+	while (cw->npend && cw->pend[0].composed) {
+		struct pend *pd = &cw->pend[0];
+		struct wbp_presented m;
+
+		if (pd->old >= 0 && cw->slotfd[pd->old] >= 0) {
+			struct pollfd f = { cw->slotfd[pd->old], POLLOUT, 0 };
+
+			if (poll(&f, 1, 0) <= 0 || !(f.revents & POLLOUT))
+				return;
+		}
+		m.slot = (uint32_t)pd->slot;
+		m.cookie = pd->cookie;
+		m.released = pd->old;
+		m.usecs = (uint32_t)us_since(&pd->t);
+		send_msg(cw->c, WBP_PRESENTED, cw->id, 0, &m, sizeof(m), -1);
+		memmove(&cw->pend[0], &cw->pend[1], sizeof(cw->pend[0]) * (size_t)(cw->npend - 1));
+		cw->npend--;
+	}
+}
+
+static void do_attach_buffer(struct client *c, struct cwin *cw, const struct wbp_hdr *h,
+			     const struct wbp_attach_buffer *ab)
+{
+	struct disp_buf b;
+	int fd = c->fd_in, ret;
+
+	c->fd_in = -1;
+	if (!cw || !ab || fd < 0 || ab->slot >= WBP_MAX_BUFFERS) {
+		if (fd >= 0)
+			close(fd);
+		send_error(c, h, EINVAL);
+		return;
+	}
+	b.format = ab->a.format == WBP_FMT_XRGB8888 ? DISP_BUF_XRGB8888 :
+		   ab->a.format == WBP_FMT_PENS ? DISP_BUF_PENS : -1;
+	b.width = ab->a.width;
+	b.height = ab->a.height;
+	b.pitch = (int)ab->a.pitch;
+	b.offset = ab->a.offset;
+	ret = b.format < 0 ? -EINVAL : disp_attach_slot(disp_current, cw->w, (int)ab->slot, fd, &b);
+	if (ret) {
+		close(fd);
+		send_error(c, h, -ret);
+		return;
+	}
+	if (cw->slotfd[ab->slot] >= 0)
+		close(cw->slotfd[ab->slot]);
+	cw->slotfd[ab->slot] = fd;		/* kept, to see when the GPU is done with it */
+	send_msg(c, WBP_ATTACHED, h->win, h->serial, NULL, 0, -1);
+}
+
+static void do_present(struct client *c, struct cwin *cw, const struct wbp_hdr *h,
+		       const struct wbp_present *pr)
+{
+	struct rect in, d;
+	struct pend *pd;
+
+	if (!cw || !pr || pr->slot >= WBP_MAX_BUFFERS || cw->slotfd[pr->slot] < 0 ||
+	    disp_show_slot(disp_current, cw->w, (int)pr->slot)) {
+		send_error(c, h, EINVAL);
+		return;
+	}
+	if (cw->npend == WBP_MAX_BUFFERS) {	/* the client is not waiting: oldest goes */
+		memmove(&cw->pend[0], &cw->pend[1], sizeof(cw->pend[0]) * (WBP_MAX_BUFFERS - 1));
+		cw->npend--;
+	}
+	pd = &cw->pend[cw->npend++];
+	pd->slot = (int)pr->slot;
+	pd->old = cw->cur_slot == (int)pr->slot ? -1 : cw->cur_slot;
+	pd->cookie = pr->cookie;
+	pd->composed = 0;
+	clock_gettime(CLOCK_MONOTONIC, &pd->t);
+	cw->cur_slot = (int)pr->slot;
+	if (!cw->attached) {
+		cw->attached = 1;
+		win_refresh(cw->scr, cw->w);
+	}
+	win_inner(cw->w, &in);
+	d = rect_make(cw->w->r.x + in.x, cw->w->r.y + in.y, in.w, in.h);
+	screen_damage(cw->scr, &d);
+}
+
+void server_flushed(void)
+{
+	struct cwin *cw;
+	int i, k;
+
+	for (i = 0; i < MAXCLIENTS; i++) {
+		if (!clients[i])
+			continue;
+		for (cw = clients[i]->wins; cw; cw = cw->next) {
+			for (k = 0; k < cw->npend; k++)
+				cw->pend[k].composed = 1;
+			check_presents(cw);
+		}
+	}
+}
+
 /*
  * A buffer the client shares becomes the window's content (a GPU buffer
  * object: a G3 card's frame in VRAM, a GPU client's picture).  The fd came
@@ -1033,6 +1184,7 @@ static void do_attach(struct client *c, struct cwin *cw, const struct wbp_hdr *h
 		send_error(c, h, EINVAL);
 		return;
 	}
+	drop_slots(cw);
 	if (fd < 0) {			/* detach: back to the window's own buffer */
 		disp_detach(disp_current, cw->w);
 		cw->attached = 0;
@@ -1216,6 +1368,14 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 		do_attach(c, cw, h, h->len >= sizeof(struct wbp_attach) ?
 				   (const struct wbp_attach *)p : NULL);
 		break;
+	case WBP_ATTACH_BUFFER:
+		do_attach_buffer(c, cw, h, h->len >= sizeof(struct wbp_attach_buffer) ?
+					   (const struct wbp_attach_buffer *)p : NULL);
+		break;
+	case WBP_PRESENT:
+		do_present(c, cw, h, h->len >= sizeof(struct wbp_present) ?
+				    (const struct wbp_present *)p : NULL);
+		break;
 	default:
 		send_error(c, h, ENOSYS);
 		break;
@@ -1281,12 +1441,25 @@ int server_pollfds(struct pollfd *fds, int max)
 		n++;
 	}
 	for (i = 0; i < MAXCLIENTS && n < max; i++) {
+		struct cwin *cw;
+
 		if (!clients[i])
 			continue;
 		fds[n].fd = clients[i]->fd;
 		fds[n].events = POLLIN;
 		fds[n].revents = 0;
 		n++;
+		/* a buffer the GPU is still reading, for a present waiting on it */
+		for (cw = clients[i]->wins; cw && n < max; cw = cw->next) {
+			struct pend *pd = &cw->pend[0];
+
+			if (!cw->npend || !pd->composed || pd->old < 0 || cw->slotfd[pd->old] < 0)
+				continue;
+			fds[n].fd = cw->slotfd[pd->old];
+			fds[n].events = POLLOUT;
+			fds[n].revents = 0;
+			n++;
+		}
 	}
 	return n;
 }
@@ -1372,9 +1545,20 @@ void server_service(struct screen *s, const struct pollfd *fds, int n)
 			clients[i]->fd_in = -1;
 			continue;
 		}
-		for (i = 0; i < MAXCLIENTS; i++)
-			if (clients[i] && clients[i]->fd == fds[j].fd)
+		for (i = 0; i < MAXCLIENTS; i++) {
+			struct cwin *cw;
+
+			if (!clients[i])
+				continue;
+			if (clients[i]->fd == fds[j].fd) {
 				read_client(i);
+				continue;
+			}
+			for (cw = clients[i]->wins; cw; cw = cw->next)
+				if (cw->npend && cw->pend[0].old >= 0 &&
+				    cw->slotfd[cw->pend[0].old] == fds[j].fd)
+					check_presents(cw);
+		}
 	}
 	for (i = 0; i < MAXCLIENTS; i++)
 		if (clients[i] && clients[i]->dead)

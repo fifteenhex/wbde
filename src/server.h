@@ -14,6 +14,8 @@ int server_open(struct screen *s, const char *path, server_penfn pen, void *pena
 int server_pollfds(struct pollfd *fds, int max);
 void server_service(struct screen *s, const struct pollfd *fds, int n);
 void server_close(void);
+/* after every flush: presents (flips) whose buffer has been composed */
+void server_flushed(void);
 /* Linux KEY_* to an Amiga raw key code, 0xff if none */
 int amiga_rawkey(int linuxkey);
 

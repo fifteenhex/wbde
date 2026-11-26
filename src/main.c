@@ -908,6 +908,7 @@ int main(int argc, char **argv)
 		wm_tick(front, now);
 		wb_tick(&W, now);
 		flush();
+		server_flushed();
 		if (got_shot) {
 			got_shot = 0;
 			shot("/tmp/wbde-shot.ppm");

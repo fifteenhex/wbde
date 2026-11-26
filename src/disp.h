@@ -55,6 +55,10 @@ struct disp_ops {
 	 * client to write into: its dma-buf in *fd, layout in *b, bytes in *size */
 	int (*share)(struct disp *d, struct win *w, int format, int width, int height, int *fd,
 		     struct disp_buf *b, uint32_t *size);
+	/* flips: a shared buffer in one of the window's slots, and which one shows */
+	int (*attach_slot)(struct disp *d, struct win *w, int slot, int fd,
+			   const struct disp_buf *b);
+	int (*show_slot)(struct disp *d, struct win *w, int slot);
 };
 
 /*
@@ -117,6 +121,8 @@ void disp_emergency(struct disp *d);
 int disp_attach(struct disp *d, struct win *w, int fd, const struct disp_buf *b);
 void disp_detach(struct disp *d, struct win *w);
 int disp_can_attach(const struct disp *d);
+int disp_attach_slot(struct disp *d, struct win *w, int slot, int fd, const struct disp_buf *b);
+int disp_show_slot(struct disp *d, struct win *w, int slot);
 int disp_share(struct disp *d, struct win *w, int format, int width, int height, int *fd,
 	       struct disp_buf *b, uint32_t *size);
 
