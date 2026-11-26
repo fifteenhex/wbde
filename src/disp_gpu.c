@@ -142,6 +142,11 @@ struct gpriv {
 	int cur_hx, cur_hy, cur_key, cur_x, cur_y, cur_shown;
 	unsigned int cur_palgen;	/* the palette the image was made with */
 	int cur_kx, cur_ky;		/* the scale the image was made at */
+	/* flipped scan-out: the last update's damage, drawn again into the other buffer */
+	struct rect prev[DAMAGE_MAX];
+	int nprev, prev_clear;
+	long t_wait;			/* this update waited for the last flip */
+	int tear_r0, tear_r1;		/* display rows this update drew */
 	/* what the flush cost */
 	long up_bytes, up_cmp, t_create, t_cursor;
 	unsigned int up_rects, ntex, ncreate;
@@ -663,6 +668,30 @@ static void build(struct gpriv *p, struct screen *s, const struct rect *d, int n
 /* the flush                                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * One update per flush, however many views are drawn in it (the screen
+ * behind, then the front one): with flipped scan-out buffers every update
+ * is a flip, and two a flush would show the half-drawn first.
+ */
+static void scan_check(struct gpriv *p);
+
+static int upd_open;
+static unsigned int upd_base;		/* vertices of this update already in its buffer */
+
+static void upd_begin(struct gpriv *p)
+{
+	struct timespec a, b;
+
+	if (upd_open)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	sgpu_update_begin(&p->s);	/* flipping: waits for the last flip */
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	p->t_wait = us_between(&a, &b);
+	upd_open = 1;
+	upd_base = 0;
+}
+
 static void draw(struct gpriv *p, const struct disp_view *v)
 {
 	sgpu_vbuf *vb = &p->vb[sgpu_update_slot(&p->s)];
@@ -670,8 +699,10 @@ static void draw(struct gpriv *p, const struct disp_view *v)
 	int prog = -1;
 	unsigned int i;
 
-	sgpu_update_begin(&p->s);
-	sgpu_vbuf_write(&p->s, vb, 0, p->verts, p->nverts);
+	upd_begin(p);
+	if (upd_base + p->nverts > MAXQUADS * 12)
+		return;
+	sgpu_vbuf_write(&p->s, vb, upd_base, p->verts, p->nverts);
 	/* screen pixels to the display through the view: (ox + x sx, oy + y sy) */
 	sgpu_m_ortho_px(m, (float)p->mw, (float)p->mh);
 	m[0][0] = 2.0f * v->sx / p->mw;
@@ -691,9 +722,9 @@ static void draw(struct gpriv *p, const struct disp_view *v)
 			sgpu_set_tex(&p->s, p->u_pal, b->pal);
 			sgpu_set_float4(&p->s, p->u_key, b->key < 0 ? -1.0f : b->key / 255.0f, 0, 0, 0);
 		}
-		sgpu_draw_range(&p->s, vb, SGPU_PRIM_TRIANGLES, b->first, b->count);
+		sgpu_draw_range(&p->s, vb, SGPU_PRIM_TRIANGLES, upd_base + b->first, b->count);
 	}
-	sgpu_update_end(&p->s);
+	upd_base += p->nverts;
 }
 
 /*
@@ -725,7 +756,9 @@ static void compose_back(struct gpriv *p, struct disp *d, struct screen *b)
 			if (w->cbm)
 				gtex_sync(p, w->cbm);
 		}
-	if (clear) {
+	/* flipping: its damage would have to be carried over too; it is a
+	   strip above a client screen, so it is simply drawn whole */
+	if (clear || sgpu_update_age(&p->s) > 1) {
 		b->ndamage = 1;
 		b->damage[0] = rect_make(0, 0, b->w, b->h);
 	}
@@ -748,6 +781,133 @@ static void compose_back(struct gpriv *p, struct disp *d, struct screen *b)
 		layers(p, b, r, n, &p->pal2, 1);
 	draw(p, &bv);
 }
+
+/*
+ * WBDE_SCANLINE=<physical address of the Radeon's registers> (BAR2):
+ * measure, for every update, where the CRTC's beam was while the GPU drew
+ * it, and which buffer the CRTC was scanning.
+ * Drawn in place, an update whose rows the beam crossed during the draw is
+ * a visible tear; flipped, the scanned buffer must never be the one drawn.
+ * Waits for every update to finish: for measuring only.  Registers are
+ * read byte-swapped (the Mediator).  smolrdn only.
+ */
+#if defined(SGPU_RDN)
+#include <sys/mman.h>
+
+#define D1CRTC_V_TOTAL			0x6020
+#define D1CRTC_STATUS_POSITION		0x60a0
+#define D1GRPH_PRIMARY_SURFACE_ADDRESS	0x6110
+
+static volatile uint32_t *scan_regs;
+static int scan_init;
+static struct {
+	unsigned long n, overlap, scanned_drawn, waited;
+	double gpu_us, wait_us;
+	uint32_t seen[2];
+	int vtotal;
+	struct timespec last;
+} SC;
+
+static uint32_t scan_rr(uint32_t reg)
+{
+	return __builtin_bswap32(scan_regs[reg / 4]);
+}
+
+static void scan_check(struct gpriv *p)
+{
+	unsigned int slot;
+	struct timespec t0, t;
+	int se, swept, sb, r0, r1, drawn, hit;
+	uint32_t addr;
+	double gpu;
+
+	if (!scan_init) {
+		const char *e = getenv("WBDE_SCANLINE");
+
+		scan_init = 1;
+		if (e) {
+			int fd = open("/dev/mem", O_RDWR | O_SYNC);
+			void *m = fd < 0 ? MAP_FAILED : mmap(NULL, 0x10000, PROT_READ, MAP_SHARED, fd,
+							     (off_t)strtoul(e, NULL, 16));
+
+			if (m != MAP_FAILED) {
+				scan_regs = m;
+				SC.vtotal = (int)(scan_rr(D1CRTC_V_TOTAL) & 0x1fff) + 1;
+				clock_gettime(CLOCK_MONOTONIC, &SC.last);
+				fprintf(stderr, "wbde: scanline from %s: %d lines a frame\n", e, SC.vtotal);
+			}
+		}
+	}
+	if (!scan_regs)
+		return;
+	/*
+	 * Where the beam is when the update's fence goes idle (polled every
+	 * 100 us with the cheap busy ioctl; reading the fence's timestamps
+	 * from the CPU can be tens of ms late), and how long the GPU drew,
+	 * from those timestamps once it is done: the rows swept are the
+	 * draw's length back from there.
+	 */
+	slot = (p->s.frames - 1) % SMOLRDN_KMS_BUFFERS;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	while (smolrdn_bo_busy(&p->s.r, &p->s.fence[slot]) == 1) {
+		usleep(100);
+		clock_gettime(CLOCK_MONOTONIC, &t);
+		if (us_between(&t0, &t) > 100000)
+			return;
+	}
+	se = (int)(scan_rr(D1CRTC_STATUS_POSITION) & 0x1fff);
+	addr = scan_rr(D1GRPH_PRIMARY_SURFACE_ADDRESS);
+	{
+		uint64_t a = smolrdn_3d_counter(p->s.fence[slot].map, 0);
+		uint64_t b = smolrdn_3d_counter(p->s.fence[slot].map, 8);
+
+		gpu = a && b > a ? (double)(b - a) / (p->s.crystal_khz * 1000.0) : 0;
+	}
+	swept = (int)(gpu * 60.0 * SC.vtotal) + 1;	/* lines a second at 60 Hz */
+	sb = se - swept;
+	if (sb < 0)
+		sb += SC.vtotal;
+	SC.n++;
+	SC.gpu_us += gpu * 1e6;
+	SC.wait_us += p->t_wait;
+	SC.waited += p->t_wait > 500;
+	r0 = p->tear_r0 < 0 ? 0 : p->tear_r0;
+	r1 = p->tear_r1 > p->mh ? p->mh : p->tear_r1;
+	if (swept >= SC.vtotal)
+		hit = 1;
+	else if (se >= sb)
+		hit = sb < r1 && se >= r0;
+	else
+		hit = sb < r1 || se >= r0;
+	drawn = p->s.k.retained_flip ? (int)p->s.k.front : 0;
+	if (!p->s.k.retained_flip)
+		SC.overlap += hit;
+	else {
+		/* scanning X while drawing buffer i: X is the other buffer, so
+		   the two buffers must always be seen scanning different ones */
+		SC.seen[drawn] = addr;
+		if (SC.seen[0] && SC.seen[0] == SC.seen[1])
+			SC.scanned_drawn++;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	if (us_between(&SC.last, &t) >= 10000000) {
+		if (p->s.k.retained_flip)
+			fprintf(stderr, "wbde: scanout (flipped): %lu updates, the scanned buffer drawn "
+				"into %lu times; GPU draw %.2f ms, flip wait %.2f ms mean (%lu waited)\n",
+				SC.n, SC.scanned_drawn, SC.gpu_us / SC.n / 1000, SC.wait_us / SC.n / 1000,
+				SC.waited);
+		else
+			fprintf(stderr, "wbde: scanout (in place): %lu updates, the beam crossed the "
+				"drawn rows during %lu of them; GPU draw %.2f ms mean\n", SC.n,
+				SC.overlap, SC.gpu_us / SC.n / 1000);
+		memset(&SC.n, 0, sizeof(SC.n) * 4);
+		SC.gpu_us = SC.wait_us = 0;
+		SC.last = t;
+	}
+}
+#else
+static void scan_check(struct gpriv *p) { (void)p; }
+#endif
 
 static void gpu_compose(struct disp *d, struct screen *s)
 {
@@ -821,31 +981,78 @@ static void gpu_compose(struct disp *d, struct screen *s)
 		p->t_cursor = us_between(&a, &b);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
+	p->t_wait = 0;
 	if (G_view.back)
 		compose_back(p, d, G_view.back);
-	if (!s->ndamage)
+	if (!s->ndamage) {
+		if (upd_open) {
+			sgpu_update_end(&p->s);
+			upd_open = 0;
+		}
 		return;
+	}
 	if (p->full)
 		screen_damage_all(s);
-	for (i = 0; i < s->ndamage; i++)
-		area += (long)s->damage[i].w * s->damage[i].h;
-	build(p, s, s->damage, s->ndamage);
-	if (p->overflow)		/* too many pieces: the whole screen, once a layer */
-		build(p, s, &all, 1);
+	{
+		/*
+		 * Flipping (age 2): the buffer drawn now last had the update
+		 * before the last drawn into the other one, so that update's
+		 * damage (and border) is drawn again as well as this one's.
+		 */
+		struct rect dm[DAMAGE_MAX * 2];
+		int nd = 0, clear = p->clear, age = (int)sgpu_update_age(&p->s);
+
+		for (i = 0; i < s->ndamage; i++) {
+			area += (long)s->damage[i].w * s->damage[i].h;
+			dm[nd++] = s->damage[i];
+		}
+		if (age > 1) {
+			for (i = 0; i < p->nprev; i++)
+				dm[nd++] = p->prev[i];
+			if (p->prev_clear)
+				p->clear = 1;
+		}
+		build(p, s, dm, nd);
+		if (p->overflow) {	/* too many pieces: the whole screen, once a layer */
+			build(p, s, &all, 1);
+			p->prev[0] = all;
+			p->nprev = 1;
+		} else {
+			memcpy(p->prev, s->damage, sizeof(s->damage[0]) * (size_t)s->ndamage);
+			p->nprev = s->ndamage;
+		}
+		p->prev_clear = clear;
+		p->tear_r0 = 1 << 30;
+		p->tear_r1 = -1;
+		for (i = 0; i < nd; i++) {
+			int a = G_view.oy + (int)(dm[i].y * G_view.sy);
+			int b = G_view.oy + (int)((dm[i].y + dm[i].h) * G_view.sy + 0.999f);
+
+			if (a < p->tear_r0)
+				p->tear_r0 = a;
+			if (b > p->tear_r1)
+				p->tear_r1 = b;
+		}
+	}
 	p->clear = 0;
 	clock_gettime(CLOCK_MONOTONIC, &t2);
 	draw(p, &G_view);
+	if (upd_open) {
+		sgpu_update_end(&p->s);
+		upd_open = 0;
+	}
 	clock_gettime(CLOCK_MONOTONIC, &t3);
+	scan_check(p);
 	s->ndamage = 0;
 	if (sgpu_error(&p->s))
 		fprintf(stderr, "wbde: the GPU display failed: %s (%d)\n", p->s.err_what, p->s.err);
 	snprintf(d->timing, sizeof(d->timing),
 		 "flush %ld px: upload %ld B of %ld in %u rects %ld us, %u quads %u draws %ld us, "
-		 "submit %ld us, gpu %.0f us (new textures %u %ld us, cursor %ld us)", area,
-		 p->up_bytes, p->up_cmp, p->up_rects, us_between(&t0, &t1),
+		 "submit %ld us (flip wait %ld), gpu %.0f us (new textures %u %ld us, cursor %ld us)",
+		 area, p->up_bytes, p->up_cmp, p->up_rects, us_between(&t0, &t1),
 		 p->nverts / 6, p->nbatch,
-		 us_between(&t1, &t2), us_between(&t2, &t3), sgpu_update_gpu_time(&p->s) * 1e6,
-		 p->ncreate, p->t_create, p->t_cursor);
+		 us_between(&t1, &t2), us_between(&t2, &t3), p->t_wait,
+		 sgpu_update_gpu_time(&p->s) * 1e6, p->ncreate, p->t_create, p->t_cursor);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1234,6 +1441,8 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 		cfg.w = cfg.h = 0;      /* the monitor's preferred mode */
 	}
 	cfg.retained = true;
+	/* two scan-out buffers flipped at vblank: the screen never tears */
+	sgpu_config_flip(&cfg, !(getenv("WBDE_GPU_FLIP") && getenv("WBDE_GPU_FLIP")[0] == '0'));
 	cfg.quiet = true;
 	cfg.name = "wbde";
 	if (sgpu_open(&p->s, &cfg)) {
@@ -1284,7 +1493,7 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	}
 	p->clear = 1;
 	for (i = 0; i < SGPU_UPDATE_SLOTS; i++)
-		sgpu_vbuf_create_own(&p->s, &p->vb[i], &sgpu_layout_2d, NULL, MAXQUADS * 6);
+		sgpu_vbuf_create_own(&p->s, &p->vb[i], &sgpu_layout_2d, NULL, MAXQUADS * 12);
 	p->xormask = -1;
 	p->palgen = 1;
 	p->full = getenv("WBDE_GPU_FULL") != NULL;
@@ -1304,9 +1513,11 @@ static int gpu_open(struct disp *d, const char *mode, const char *size)
 	}
 	d->composes = 1;
 	d->hw_pointer = p->cursor;
-	snprintf(d->desc, sizeof(d->desc), "GPU (smolgpu %s, %s), %dx%d XRGB8888, screen %dx%d, %s",
-		 SGPU_BACKEND, SGPU_CARD_NAME, mw, mh, p->lw, p->lh,
-		 p->cursor ? "hardware cursor" : "pointer as a layer");
+	snprintf(d->desc, sizeof(d->desc), "GPU (smolgpu %s, %s), %dx%d XRGB8888, screen %dx%d, %s, "
+		 "%s", SGPU_BACKEND, SGPU_CARD_NAME, mw, mh, p->lw, p->lh,
+		 p->cursor ? "hardware cursor" : "pointer as a layer",
+		 sgpu_update_age(&p->s) > 1 ? "two scan-out buffers flipped at vblank" :
+		 "drawn in place");
 	return 0;
 fail:
 	gpu_close(d);

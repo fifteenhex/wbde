@@ -16,6 +16,9 @@ void server_service(struct screen *s, const struct pollfd *fds, int n);
 void server_close(void);
 /* after every flush: presents (flips) whose buffer has been composed */
 void server_flushed(void);
+/* the longest the main loop may sleep (-1: as it likes), and the look it takes then */
+int server_timeout_ms(void);
+void server_tick(void);
 /* Linux KEY_* to an Amiga raw key code, 0xff if none */
 int amiga_rawkey(int linuxkey);
 

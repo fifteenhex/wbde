@@ -1150,6 +1150,35 @@ static void do_present(struct client *c, struct cwin *cw, const struct wbp_hdr *
 	screen_damage(cw->scr, &d);
 }
 
+/*
+ * How long the main loop may sleep: a present waiting for the GPU to let
+ * go of a buffer is woken by the dma-buf's poll, but that wakeup can
+ * go missing, leaving the answer until the card's flip timeout
+ * (200-250 ms).  So look again every tick as well.
+ */
+int server_timeout_ms(void)
+{
+	struct cwin *cw;
+	int i;
+
+	for (i = 0; i < MAXCLIENTS; i++)
+		for (cw = clients[i] ? clients[i]->wins : NULL; cw; cw = cw->next)
+			if (cw->npend)
+				return 10;
+	return -1;
+}
+
+void server_tick(void)
+{
+	struct cwin *cw;
+	int i;
+
+	for (i = 0; i < MAXCLIENTS; i++)
+		for (cw = clients[i] ? clients[i]->wins : NULL; cw; cw = cw->next)
+			if (cw->npend)
+				check_presents(cw);
+}
+
 void server_flushed(void)
 {
 	struct cwin *cw;

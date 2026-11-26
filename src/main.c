@@ -891,6 +891,8 @@ int main(int argc, char **argv)
 		timeout = wm_busy(front) ? 20 : 500;
 		if (input_poll_ms() > 0 && input_poll_ms() < timeout)
 			timeout = input_poll_ms();
+		if (server_timeout_ms() >= 0 && server_timeout_ms() < timeout)
+			timeout = server_timeout_ms();
 		if (poll(fds, (nfds_t)(ni + nc + ns + (ctl_fd >= 0)), timeout) < 0 && errno != EINTR)
 			break;
 		now = now_ms();
@@ -909,6 +911,7 @@ int main(int argc, char **argv)
 		wb_tick(&W, now);
 		flush();
 		server_flushed();
+		server_tick();
 		if (got_shot) {
 			got_shot = 0;
 			shot("/tmp/wbde-shot.ppm");
