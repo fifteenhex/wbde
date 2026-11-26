@@ -1,0 +1,22 @@
+option('cpu', type: 'combo', choices: ['68040', '68060'], value: '68040',
+       description: 'm68k CPU to compile for')
+option('gpu', type: 'combo', choices: ['rdn', 'nvda', 'none'], value: 'rdn',
+       description: 'the GPU display, through smolgpu: Radeon (smolrdn), GeForce (smolnvda) or none')
+option('soft', type: 'boolean', value: true,
+       description: 'the software display (smol2d on DRM)')
+option('fake_gpu', type: 'boolean', value: false,
+       description: 'run the GPU display on smolgl\'s fake Radeon, for testing on a PC')
+option('smol2d', type: 'string', value: '../smol2d',
+       description: 'smol2d checkout (relative to the source directory)')
+option('smoldrm', type: 'string', value: '../smoldrm',
+       description: 'smoldrm checkout')
+option('smolinput', type: 'string', value: '../smolinput',
+       description: 'smolinput checkout')
+option('smolgpu', type: 'string', value: '../smolgpu',
+       description: 'smolgpu checkout')
+option('smolrdn', type: 'string', value: '../smolrdn',
+       description: 'smolrdn checkout')
+option('smolnvda', type: 'string', value: '../smolnvda',
+       description: 'smolnvda checkout')
+option('smolgl', type: 'string', value: '../smolgl',
+       description: 'smolgl checkout (for fake_gpu)')
