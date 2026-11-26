@@ -370,6 +370,27 @@ static void quad(struct gpriv *p, const struct rect *r, float u, float v, float 
 	}
 }
 
+/* the screen area [x0, x1) x [y0, y1) showing texels [u0, u1) x [v0, v1) */
+static void quadf(struct gpriv *p, float x0, float y0, float x1, float y1, float u0, float v0,
+		  float u1, float v1, float tw, float th)
+{
+	static const float c[6][2] = { {0,0}, {1,0}, {1,1}, {0,0}, {1,1}, {0,1} };
+	int i;
+
+	if (p->nverts + 6 > MAXQUADS * 6) {
+		p->overflow = 1;
+		return;
+	}
+	for (i = 0; i < 6; i++) {
+		sgpu_vertex_2d *q = &p->verts[p->nverts++];
+
+		q->pos[0] = x0 + c[i][0] * (x1 - x0);
+		q->pos[1] = y0 + c[i][1] * (y1 - y0);
+		q->uv[0] = (u0 + c[i][0] * (u1 - u0)) / tw;
+		q->uv[1] = (v0 + c[i][1] * (v1 - v0)) / th;
+	}
+}
+
 /* every rectangle of `rects` that the layer at (x, y) shows in, from its texture */
 static void layer(struct gpriv *p, struct bm *bm, int x, int y, const struct rect *rects,
 		  int n, const signed char *skip, const sgpu_tex *pal, int key)
@@ -389,7 +410,7 @@ static void layer(struct gpriv *p, struct bm *bm, int x, int y, const struct rec
 
 /* a window's shared content over its inner area, scaled to fit */
 static void ext_layer(struct gpriv *p, struct win *w, const struct rect *rects, int n,
-		      const signed char *skip)
+		      const signed char *skip, const sgpu_tex *pal)
 {
 	struct ext *e = w->ext;
 	struct rect in, c;
@@ -404,7 +425,7 @@ static void ext_layer(struct gpriv *p, struct win *w, const struct rect *rects, 
 	sx = (float)e->w / in.w;
 	sy = (float)e->h / in.h;
 	if (e->format == DISP_BUF_PENS)
-		batch_begin(p, PROG_PAL, &e->t, &p->pal, -1);
+		batch_begin(p, PROG_PAL, &e->t, pal, -1);
 	else
 		batch_begin(p, PROG_BLIT, &e->t, NULL, -1);
 	for (i = 0; i < n; i++)
@@ -412,6 +433,71 @@ static void ext_layer(struct gpriv *p, struct win *w, const struct rect *rects, 
 			quad(p, &c, (c.x - in.x) * sx, (c.y - in.y) * sy, sx, sy, (float)e->w,
 			     (float)e->h);
 	batch_end(p);
+}
+
+/*
+ * An unscaled window's content: a tw x th texture over cw x ch display
+ * pixels from the content origin, whatever the screen's scale (1:1 when
+ * the texture is that size), clipped to the inner area.  Positions are in
+ * screen coordinates like everything else, so they are fractions of a
+ * screen pixel; the origin is a whole display pixel, so every display
+ * pixel's centre lands in the middle of one texel and nothing is resampled.
+ */
+static void content_layer(struct gpriv *p, struct screen *s, struct win *w, const sgpu_tex *t,
+			  int tw, int th, int prog, const sgpu_tex *pal, const struct rect *rects,
+			  int n, const signed char *skip)
+{
+	float kx = s->sx > 0 ? s->sx : 1, ky = s->sy > 0 ? s->sy : 1;
+	float x0, y0, cx1, cy1, ux, uy;
+	struct rect in;
+	int X, Y, i;
+
+	if (w->cw <= 0 || w->ch <= 0)
+		return;
+	win_inner(w, &in);
+	in.x += w->r.x;
+	in.y += w->r.y;
+	win_content_origin(s, w, &X, &Y);
+	x0 = X / kx;
+	y0 = Y / ky;
+	cx1 = x0 + w->cw / kx;
+	cy1 = y0 + w->ch / ky;
+	if (cx1 > in.x + in.w)
+		cx1 = (float)(in.x + in.w);
+	if (cy1 > in.y + in.h)
+		cy1 = (float)(in.y + in.h);
+	ux = (float)tw / w->cw * kx;	/* texels a screen pixel */
+	uy = (float)th / w->ch * ky;
+	batch_begin(p, prog, t, pal, -1);
+	for (i = 0; i < n; i++) {
+		const struct rect *r = &rects[i];
+		float a = r->x > x0 ? r->x : x0, b = r->y > y0 ? r->y : y0;
+		float c = r->x + r->w < cx1 ? r->x + r->w : cx1;
+		float d = r->y + r->h < cy1 ? r->y + r->h : cy1;
+
+		if ((skip && skip[i]) || c <= a || d <= b)
+			continue;
+		quadf(p, a, b, c, d, (a - x0) * ux, (b - y0) * uy, (c - x0) * ux, (d - y0) * uy,
+		      (float)tw, (float)th);
+	}
+	batch_end(p);
+}
+
+/* what shows in a window's inner area besides its backing store */
+static void win_content(struct gpriv *p, struct screen *s, struct win *w, const struct rect *r,
+			int n, const signed char *skip, const sgpu_tex *pal)
+{
+	struct ext *e = w->ext;
+
+	if (w->unscaled && e)
+		content_layer(p, s, w, &e->t, e->w, e->h,
+			      e->format == DISP_BUF_PENS ? PROG_PAL : PROG_BLIT, pal, r, n, skip);
+	else if (w->unscaled && w->cbm && w->cbm->gpu) {
+		struct gtex *g = w->cbm->gpu;
+
+		content_layer(p, s, w, &g->t, g->w, g->h, PROG_PAL, pal, r, n, skip);
+	} else if (e)
+		ext_layer(p, w, r, n, skip, pal);
 }
 
 /*
@@ -442,8 +528,8 @@ static void layers(struct gpriv *p, struct screen *s, const struct rect *r, int 
 			if (cover[i] == w)
 				skip[i] = 0;
 		layer(p, &w->bm, w->r.x, w->r.y, r, n, skip, pal, -1);
-		if (w->ext && with_ext)
-			ext_layer(p, w, r, n, skip);
+		if (with_ext)
+			win_content(p, s, w, r, n, skip, pal);
 	}
 	for (o = s->overlays; o; o = o->next)
 		layer(p, o->bm, o->x, o->y, r, n, NULL, pal, o->key);
@@ -565,8 +651,11 @@ static void compose_back(struct gpriv *p, struct disp *d, struct screen *b)
 	}
 	gtex_sync(p, &b->root);
 	for (w = b->bottom; w; w = w->above)
-		if (!w->dead)
+		if (!w->dead) {
 			gtex_sync(p, &w->bm);
+			if (w->cbm)
+				gtex_sync(p, w->cbm);
+		}
 	if (clear) {
 		b->ndamage = 1;
 		b->damage[0] = rect_make(0, 0, b->w, b->h);
@@ -623,8 +712,11 @@ static void gpu_compose(struct disp *d, struct screen *s)
 	/* what was drawn into the layers, to their textures */
 	gtex_sync(p, &s->root);
 	for (w = s->bottom; w; w = w->above)
-		if (!w->dead)
+		if (!w->dead) {
 			gtex_sync(p, &w->bm);
+			if (w->cbm)
+				gtex_sync(p, w->cbm);
+		}
 	for (o = s->overlays; o; o = o->next)
 		gtex_sync(p, o->bm);
 	{
@@ -698,7 +790,7 @@ static int in_ext(struct screen *s, int x, int y)
 	for (w = s->bottom; w; w = w->above)
 		if (!w->dead && rect_contains(&w->r, x, y))
 			top = w;
-	if (top && top->ext) {
+	if (top && (top->ext || top->unscaled)) {
 		struct rect in;
 
 		win_inner(top, &in);

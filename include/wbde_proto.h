@@ -102,11 +102,15 @@ struct wbp_screen {
 #define WBP_WF_REPORTMOUSE	0x20000	/* MOUSEMOVE while active, not only while dragging */
 #define WBP_WF_VRAM		0x40000	/* the buffer in video memory, if the display composes:
 					   writes go straight to the card, reads are slow */
+#define WBP_WF_UNSCALED		0x80000	/* the content is in display pixels, shown 1:1, not
+					   scaled with Workbench (composing displays; the
+					   answer's WBP_WIN_UNSCALED says it was granted) */
 
 struct wbp_open {
 	int16_t left, top;		/* outer position on the screen */
-	uint16_t width, height;		/* inner size: what the client draws */
-	uint16_t minwidth, minheight, maxwidth, maxheight;	/* inner, 0 = any */
+	uint16_t width, height;		/* inner size: what the client draws (with
+					   WBP_WF_UNSCALED: in display pixels) */
+	uint16_t minwidth, minheight, maxwidth, maxheight;	/* inner, 0 = any (likewise) */
 	uint32_t flags;			/* WBP_WF_* */
 	uint32_t idcmp;			/* IDCMP_* classes the client wants */
 	char title[80];
@@ -181,20 +185,27 @@ struct wbp_palette {
 
 struct wbp_window {
 	int16_t left, top;		/* outer */
-	uint16_t width, height;		/* inner: the buffer's size */
+	uint16_t width, height;		/* inner: the buffer's size (WBP_WIN_UNSCALED: display
+					   pixels, the content's; else screen pixels) */
 	uint16_t stride;		/* bytes per buffer row */
-	uint16_t bl, bt, br, bb;	/* borders around it */
+	uint16_t bl, bt, br, bb;	/* borders around it (screen pixels) */
 	uint16_t flags;			/* WBP_WIN_* */
 	uint32_t size;			/* bytes to mmap */
+	/* added with WBP_WF_UNSCALED: a message without them is from an older
+	   wbde, which never grants it */
+	uint32_t scalex, scaley;	/* display pixels per screen pixel, 16.16 */
 };
+#define WBP_WINDOW_V1_SIZE	(sizeof(struct wbp_window) - 2 * sizeof(uint32_t))
 
 #define WBP_WIN_VRAM		0x0001	/* this buffer is in video memory (asked with WBP_WF_VRAM) */
+#define WBP_WIN_UNSCALED	0x0002	/* the content is in display pixels, 1:1 (WBP_WF_UNSCALED) */
 
 /*
  * WBP_ATTACH: the window's inner area shows a buffer the client shares as
  * a dma-buf (a GPU buffer object: its own, or one a card on the bus writes
- * into), scaled to the inner size by the display; WBP_DAMAGE says it
- * changed.  Only a composing (GPU) display can: others answer -ENOTSUP.
+ * into), scaled to the inner size by the display (an unscaled window's: to
+ * its content size in display pixels, so a buffer that size is shown 1:1);
+ * WBP_DAMAGE says it changed.  Only a composing (GPU) display can: others answer -ENOTSUP.
  * Sent with no fd, the window goes back to its own buffer.
  */
 #define WBP_FMT_PENS		0	/* a byte a pixel, the screen's pens */
@@ -255,7 +266,7 @@ struct wbp_event {
 	uint32_t class;		/* one IDCMP_* */
 	uint16_t code;		/* button code, raw key, menu id, character */
 	uint16_t qualifier;
-	int16_t mousex, mousey;	/* inner coordinates */
+	int16_t mousex, mousey;	/* inner coordinates (an unscaled window's: content pixels) */
 	uint32_t seconds, micros;
 	uint16_t linuxkey;	/* RAWKEY: the Linux KEY_* it came from */
 	uint16_t pad;

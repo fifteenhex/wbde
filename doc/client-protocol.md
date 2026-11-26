@@ -67,7 +67,8 @@ both ends are on the same machine.  A request that fails is answered with
 `wbp_open` gives the outer position, the inner size and its limits, the
 `WBP_WF_*` flags (the Intuition window flags a client can have: `CLOSE`,
 `DEPTH`, `ZOOM`, `SIZE`, `DRAG`, `BORDERLESS`, `BACKDROP`, `RMBTRAP`, plus
-`ACTIVATE` and `REPORTMOUSE`), the IDCMP mask and the title.
+`ACTIVATE` and `REPORTMOUSE`, and wbde's own `VRAM` and `UNSCALED`, below),
+the IDCMP mask and the title.
 
 Menus are a flat list in order: a `WBP_MENU`, its `WBP_ITEM`s and
 `WBP_BAR`s, each item followed by its `WBP_SUBITEM`s.  Items carry a
@@ -82,7 +83,7 @@ is an event.
 | message | payload |
 |---|---|
 | `WBP_SCREEN` | `wbp_screen`: size, depth, title bar and border sizes, font, pens, palette |
-| `WBP_WINDOW` | `wbp_window` + the buffer's fd: outer position, inner size, stride, borders, bytes to map |
+| `WBP_WINDOW` | `wbp_window` + the buffer's fd: outer position, inner size, stride, borders, flags, bytes to map, the screen's scale |
 | `WBP_EVENT` | `wbp_event`: class, code, qualifier, inner mouse position, time, Linux key |
 | `WBP_PEN` | `uint32_t` |
 | `WBP_FONT` | `wbp_font`, 257 `wbp_glyph`, then `modulo * ysize` bytes of glyph rows |
@@ -178,6 +179,50 @@ inner area is redrawn from it.  The buffer must be on the same card: a
 GEM object exported with `DRM_IOCTL_PRIME_HANDLE_TO_FD`, for example from
 the render node, or a frame that another card writes into VRAM over PCI.
 `wbclient.h` has `wbc_attach()`.
+
+## Unscaled content
+
+Workbench is shown at a scale (3x on a 1920x1200 panel, for a 640x400
+Workbench), and so is every window's content.  A client whose pixels are
+already display-sized, such as a camera, another computer's framebuffer or
+a video, can ask for them not to be.
+
+`WBP_WF_UNSCALED` (`0x80000`) in `wbp_open.flags`: the content is in
+display pixels and is shown 1:1.
+
+- `wbp_open`'s width and height, and the size limits, are display pixels.
+  wbde makes the inner area that many display pixels, rounded up to whole
+  screen pixels (one more at a scale that is not a whole number), so the
+  frame, the title bar and the gadgets stay at Workbench's scale around it.
+  The content starts at the inner area's top left, on a whole display
+  pixel; what the rounding leaves at the right and the bottom (under one
+  screen pixel) is the background pen.
+- The answer's `wbp_window.flags` has `WBP_WIN_UNSCALED` when the flag
+  was granted.  Then `width`, `height` and `stride` are the content's, in
+  display pixels, and the shared buffer holds the content pixel for pixel.
+  The borders are still screen pixels.  Without it (a display that does
+  not compose, see below) the window is an ordinary one and the sizes are
+  screen pixels; the client can open again without the flag at a size of
+  its choice.
+- `wbp_window.scalex` and `scaley` (16.16, display pixels a screen pixel)
+  come with every `WBP_WINDOW`, unscaled or not, so that a client can pick
+  a size that is a whole multiple.  They are at the end of `wbp_window`: a
+  message `WBP_WINDOW_V1_SIZE` long is from a wbde without them, which
+  never grants the flag.
+- `WBP_DAMAGE` rectangles, `WBP_MOVE_SIZE`'s inner size and every event's
+  `mousex` and `mousey` are content pixels.  The mouse position is where
+  the pointer's hot spot is drawn, measured from the content's top left;
+  the pointer moves display width / 640 display pixels a mouse count, so
+  that is the resolution of positions, not one pixel.
+- The window may still be sizeable: after the user sizes it, the new
+  buffer is as many display pixels as the inner area holds.
+- It combines with the other two kinds of content: with `WBP_WF_VRAM` the
+  VRAM buffer is display-sized, and with `WBP_ATTACH` the attached buffer
+  is shown over the content size (scaled from its own size, so a buffer
+  the content's size is 1:1 and one half its size an exact 2x).
+- Only the GPU display grants it.  The software display composes the
+  logical Workbench in RAM and scales the whole screen on the way out, so
+  there is no display pixel to put the content on.
 
 ## Screens
 

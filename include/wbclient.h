@@ -11,7 +11,12 @@
  * With a GPU display, two more ways to fill a window (see client-protocol.md):
  * WBP_WF_VRAM in wbc_open's flags puts w.pixels in video memory (w.vram is
  * then set: write, never read), and wbc_attach() shows a GPU buffer the
- * client owns (a dma-buf) as the window's content.
+ * client owns (a dma-buf) as the window's content.  WBP_WF_UNSCALED asks for
+ * the content in display pixels, shown 1:1 whatever Workbench's scale: the
+ * size given and w.width/height are then display pixels, and w.unscaled says
+ * wbde granted it (an older wbde, or one without a GPU display, does not, and
+ * the sizes are screen pixels).  w.scalex/scaley are the display
+ * pixels a screen pixel takes (0: an older wbde that does not say).
  */
 #ifndef WBCLIENT_H
 #define WBCLIENT_H
@@ -37,6 +42,8 @@ struct wbc_window {
 	size_t size;
 	int changed;		/* a new buffer arrived (resize): redraw */
 	int vram;		/* pixels are in video memory: writes only */
+	int unscaled;		/* sizes and mouse positions in display pixels, shown 1:1 */
+	float scalex, scaley;	/* display pixels a screen pixel, 0 unknown */
 };
 
 struct wbc {
@@ -138,9 +145,14 @@ static inline struct wbc_window *wbc__find(struct wbc *c, uint32_t id)
 	return NULL;
 }
 
-static inline void wbc__window(struct wbc *c, struct wbc_window *w, const struct wbp_window *m, int fd)
+static inline void wbc__window(struct wbc *c, struct wbc_window *w, const void *p, size_t len,
+				int fd)
 {
+	struct wbp_window mm, *m = &mm;
+
 	(void)c;
+	memset(&mm, 0, sizeof(mm));
+	memcpy(&mm, p, len < sizeof(mm) ? len : sizeof(mm));
 	if (w->pixels)
 		munmap(w->pixels, w->size);
 	w->left = m->left;
@@ -150,6 +162,9 @@ static inline void wbc__window(struct wbc *c, struct wbc_window *w, const struct
 	w->stride = m->stride;
 	w->size = m->size;
 	w->vram = (m->flags & WBP_WIN_VRAM) != 0;
+	w->unscaled = (m->flags & WBP_WIN_UNSCALED) != 0;
+	w->scalex = m->scalex / 65536.0f;
+	w->scaley = m->scaley / 65536.0f;
 	w->pixels = mmap(NULL, w->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (w->pixels == MAP_FAILED)
 		w->pixels = NULL;
@@ -172,7 +187,7 @@ static inline void wbc__other(struct wbc *c, const struct wbp_hdr *h, void *p, i
 	case WBP_WINDOW:
 		w = wbc__find(c, h->win);
 		if (w && fd >= 0)
-			wbc__window(c, w, p, fd);
+			wbc__window(c, w, p, h->len, fd);
 		else if (fd >= 0)
 			close(fd);
 		break;
@@ -249,6 +264,7 @@ static inline int wbc_open(struct wbc *c, struct wbc_window *w, int left, int to
 	int fd = -1, i, ret;
 
 	memset(&o, 0, sizeof(o));
+	memset(&m, 0, sizeof(m));
 	memset(w, 0, sizeof(*w));
 	o.left = (int16_t)left;
 	o.top = (int16_t)top;
@@ -267,7 +283,7 @@ static inline int wbc_open(struct wbc *c, struct wbc_window *w, int left, int to
 		return -1;
 	}
 	c->wins[i] = w;
-	wbc__window(c, w, &m, fd);
+	wbc__window(c, w, &m, sizeof(m), fd);
 	return 0;
 }
 

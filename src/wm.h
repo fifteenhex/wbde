@@ -97,6 +97,17 @@ struct win {
 	 * only matters to the software composition used for screenshots.
 	 */
 	void *ext;
+	/*
+	 * Unscaled content (a client's WBP_WF_UNSCALED, composing displays):
+	 * the inner area shows cw x ch display pixels 1:1 from its top left
+	 * (win_content_origin), whatever the screen's scale; the inner size is
+	 * that rounded up to whole screen pixels, the rest of it bm's own
+	 * (background).  The pixels are ext's (a client buffer the display
+	 * holds), or cbm's, a bitmap at display resolution wbde keeps.
+	 */
+	int unscaled;
+	int cw, ch;
+	struct bm *cbm;
 };
 
 /* a composing display frees a window's ext here when the window goes */
@@ -211,7 +222,15 @@ void win_refresh(struct screen *s, struct win *w);
 void win_refresh_frame(struct screen *s, struct win *w);
 /* redraw only r of the content (inner coordinates), and damage only that */
 void win_refresh_rect(struct screen *s, struct win *w, const struct rect *r);
-void win_inner(const struct win *w, struct rect *r);	/* in window coords */
+void win_inner(const struct win *w, struct rect *r);
+/* an unscaled window's content on the display: its top left, in display
+   pixels from the screen's own origin (add s->ox, s->oy) */
+void win_content_origin(const struct screen *s, const struct win *w, int *x, int *y);
+/* the display pixel of screen coordinate v at scale k, as the pointer is drawn */
+static inline int scr_to_disp(int v, float k)
+{
+	return (int)(v * k);
+}	/* in window coords */
 void win_set_scroll(struct screen *s, struct win *w, int vtotal, int vvis, int vtop,
 		    int htotal, int hvis, int htop);
 struct win *win_at(struct screen *s, int x, int y);

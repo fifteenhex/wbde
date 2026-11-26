@@ -61,6 +61,16 @@ void win_inner(const struct win *w, struct rect *r)
 	*r = rect_make(w->bl, w->bt, w->r.w - w->bl - w->br, w->r.h - w->bt - w->bb);
 }
 
+/* rounded to a whole display pixel, so the content is never resampled
+   even at a scale that is not a whole number */
+void win_content_origin(const struct screen *s, const struct win *w, int *x, int *y)
+{
+	float kx = s->sx > 0 ? s->sx : 1, ky = s->sy > 0 ? s->sy : 1;
+
+	*x = (int)((w->r.x + w->bl) * kx + 0.5f);
+	*y = (int)((w->r.y + w->bt) * ky + 0.5f);
+}
+
 /* gadget rectangles, window coordinates */
 static int gadget_rect(const struct screen *s, const struct win *w, int g, struct rect *r)
 {

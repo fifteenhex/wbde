@@ -41,6 +41,9 @@ struct cwin {
 	struct bm view;		/* the shared buffer as a bitmap */
 	int vram;		/* the buffer is the display's, in VRAM (WBP_WF_VRAM) */
 	int attached;		/* the content is a buffer the client attached */
+	int unscaled;		/* the content in display pixels, 1:1 (WBP_WF_UNSCALED) */
+	struct bm cbm;		/* unscaled, in RAM: what the display shows of it */
+	int want_w, want_h;	/* unscaled: the content size asked for, 0 none */
 	uint32_t idcmp;
 	/* its pointer, while it is the active window */
 	int ptr_kind;		/* WBP_PTR_* */
@@ -176,6 +179,46 @@ static void send_event(struct cwin *cw, uint32_t class, uint16_t code, unsigned 
 	send_msg(cw->c, WBP_EVENT, cw->id, 0, &e, sizeof(e), -1);
 }
 
+/* --- unscaled windows: content in display pixels --- */
+
+static float kx_of(const struct cwin *cw)
+{
+	return cw->scr->sx > 0 ? cw->scr->sx : 1;
+}
+
+static float ky_of(const struct cwin *cw)
+{
+	return cw->scr->sy > 0 ? cw->scr->sy : 1;
+}
+
+/*
+ * The screen pixels that hold n display pixels: rounded up, and one more
+ * at a scale that is not whole, since the content's origin is rounded to
+ * a display pixel and may start up to half of one late.
+ */
+static int to_screen(int n, float k)
+{
+	int m = (int)(n / k), slack = k != (float)(int)k;
+
+	while (m * k < n + slack)
+		m++;
+	return m;
+}
+
+/* inner coordinates to content pixels: where the pointer is drawn, from
+   the content's top left */
+static void to_content(const struct cwin *cw, int *x, int *y)
+{
+	const struct win *w = cw->w;
+	int X, Y;
+
+	if (!cw->unscaled)
+		return;
+	win_content_origin(cw->scr, w, &X, &Y);
+	*x = scr_to_disp(w->r.x + w->bl + *x, kx_of(cw)) - X;
+	*y = scr_to_disp(w->r.y + w->bt + *y, ky_of(cw)) - Y;
+}
+
 /* --- shared buffers --- */
 
 /*
@@ -203,6 +246,10 @@ static int make_vram_buffer(struct cwin *cw, int w, int h)
 	cw->view.w = b.width;
 	cw->view.h = b.height;
 	cw->view.stride = b.pitch;
+	if (cw->unscaled) {
+		cw->w->cw = b.width;
+		cw->w->ch = b.height;
+	}
 	return 0;
 }
 
@@ -243,6 +290,22 @@ static int make_buffer(struct cwin *cw, int w, int h)
 	cw->view.w = w;
 	cw->view.h = h;
 	cw->view.stride = stride;
+	if (cw->unscaled) {
+		/* what the display shows: a copy, taken on WBP_DAMAGE */
+		struct rp rp;
+
+		bm_free(&cw->cbm);
+		cw->w->cbm = NULL;
+		if (bm_alloc(&cw->cbm, w, h))
+			return -ENOMEM;
+		rp_init(&rp, &cw->cbm);
+		rp_blit(&rp, 0, 0, &cw->view, 0, 0, w, h, -1);
+		cw->w->cbm = &cw->cbm;
+	}
+	if (cw->unscaled && cw->w) {
+		cw->w->cw = w;
+		cw->w->ch = h;
+	}
 	return 0;
 }
 
@@ -260,8 +323,10 @@ static void send_window(struct cwin *cw, uint32_t serial)
 	m.bt = (uint16_t)w->bt;
 	m.br = (uint16_t)w->br;
 	m.bb = (uint16_t)w->bb;
-	m.flags = cw->vram ? WBP_WIN_VRAM : 0;
+	m.flags = (cw->vram ? WBP_WIN_VRAM : 0) | (cw->unscaled ? WBP_WIN_UNSCALED : 0);
 	m.size = (uint32_t)cw->shmsize;
+	m.scalex = (uint32_t)(kx_of(cw) * 65536.0f + 0.5f);
+	m.scaley = (uint32_t)(ky_of(cw) * 65536.0f + 0.5f);
 	send_msg(cw->c, WBP_WINDOW, cw->id, serial, &m, sizeof(m), cw->memfd);
 }
 
@@ -272,7 +337,7 @@ static void cw_draw(struct win *w, struct rp *rp)
 	struct cwin *cw = w->priv;
 
 	/* content the display draws itself (VRAM): nothing of it here */
-	if (cw->vram || cw->attached || !cw->view.px) {
+	if (cw->vram || cw->attached || cw->unscaled || !cw->view.px) {
 		rp_fill(rp, 0, 0, rp->clip.w, rp->clip.h, cw->scr->pens[P_BACKGROUND]);
 		return;
 	}
@@ -287,11 +352,13 @@ static void cw_button(struct win *w, int x, int y, int button, int down, unsigne
 
 	if (button < 1 || button > 3)
 		return;
+	to_content(w->priv, &x, &y);
 	send_event(w->priv, IDCMP_MOUSEBUTTONS, codes[button][down ? 1 : 0], qual, x, y, 0);
 }
 
 static void cw_motion(struct win *w, int x, int y)
 {
+	to_content(w->priv, &x, &y);
 	send_event(w->priv, IDCMP_MOUSEMOVE, 0, 0, x, y, 0);
 }
 
@@ -301,6 +368,7 @@ static void cw_key(struct win *w, const struct keyev *k)
 	int raw = amiga_rawkey(k->code);
 	int mx = cw->scr->mx - w->r.x - w->bl, my = cw->scr->my - w->r.y - w->bt;
 
+	to_content(cw, &mx, &my);
 	if (raw != 0xff)
 		send_event(cw, IDCMP_RAWKEY, (uint16_t)(raw | (k->down ? 0 : IECODE_UP_PREFIX)),
 			   k->qual | (k->down == 2 ? IEQUALIFIER_REPEAT : 0), mx, my, k->code);
@@ -325,6 +393,16 @@ static void cw_resized(struct win *w)
 	if (cw->memfd < 0)
 		return;
 	win_inner(w, &in);
+	if (cw->unscaled && cw->want_w) {
+		/* the client asked for this content size (WBP_MOVE_SIZE) */
+		in.w = cw->want_w;
+		in.h = cw->want_h;
+		cw->want_w = cw->want_h = 0;
+	} else if (cw->unscaled) {
+		/* sized by the user: as many display pixels as the inner area has */
+		in.w = (int)(in.w * kx_of(cw));
+		in.h = (int)(in.h * ky_of(cw));
+	}
 	if (make_buffer(cw, in.w, in.h))
 		return;
 	send_window(cw, 0);
@@ -500,6 +578,7 @@ static void destroy_win(struct cwin *cw)
 	if (cw->w)
 		win_close(cw->scr, cw->w);	/* and the display's content with it */
 	cw->w = NULL;
+	bm_free(&cw->cbm);
 	bm_free(&cw->ptr);
 	free_menus(cw);
 	if (cw->shm)
@@ -799,7 +878,7 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	struct cwin *cw = calloc(1, sizeof(*cw));
 	char title[81];
 	struct rect r, in;
-	int ret;
+	int ret, iw, ih;
 
 	if (!cw) {
 		send_error(c, h, ENOMEM);
@@ -824,27 +903,44 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	cw->idcmp = o->idcmp;
 	/* in VRAM only if asked and the display composes; else the usual memfd */
 	cw->vram = (o->flags & WBP_WF_VRAM) && disp_current && disp_current->ops->share;
+	/* content in display pixels: only a display that composes can show it so */
+	cw->unscaled = (o->flags & WBP_WF_UNSCALED) && disp_current && disp_current->composes;
 	/* the client gives the inner size; borders are the window core's business */
-	r = rect_make(o->left, o->top, o->width, o->height);
+	iw = o->width;
+	ih = o->height;
+	if (cw->unscaled) {
+		iw = to_screen(iw, kx_of(cw));
+		ih = to_screen(ih, ky_of(cw));
+	}
+	r = rect_make(o->left, o->top, iw, ih);
 	cw->w = win_open(cw->scr, &r, flags, title, &cw_ops, cw);
 	if (!cw->w) {
 		free(cw);
 		send_error(c, h, ENOMEM);
 		return;
 	}
-	r.w = o->width + cw->w->bl + cw->w->br;
-	r.h = o->height + cw->w->bt + cw->w->bb;
+	cw->w->unscaled = cw->unscaled;
+	r.w = iw + cw->w->bl + cw->w->br;
+	r.h = ih + cw->w->bt + cw->w->bb;
+#define INNER(v, k) (cw->unscaled ? to_screen((v), (k)) : (v))
 	if (o->minwidth)
-		cw->w->minw = o->minwidth + cw->w->bl + cw->w->br;
+		cw->w->minw = INNER(o->minwidth, kx_of(cw)) + cw->w->bl + cw->w->br;
 	if (o->minheight)
-		cw->w->minh = o->minheight + cw->w->bt + cw->w->bb;
+		cw->w->minh = INNER(o->minheight, ky_of(cw)) + cw->w->bt + cw->w->bb;
 	if (o->maxwidth)
-		cw->w->maxw = o->maxwidth + cw->w->bl + cw->w->br;
+		cw->w->maxw = INNER(o->maxwidth, kx_of(cw)) + cw->w->bl + cw->w->br;
 	if (o->maxheight)
-		cw->w->maxh = o->maxheight + cw->w->bt + cw->w->bb;
+		cw->w->maxh = INNER(o->maxheight, ky_of(cw)) + cw->w->bt + cw->w->bb;
+#undef INNER
 	cw->w->wants_motion = (o->flags & WBP_WF_REPORTMOUSE) != 0;
 	win_move_size(cw->scr, cw->w, &r);
 	win_inner(cw->w, &in);
+	if (cw->unscaled) {
+		/* the content is what was asked for, even if the screen clipped
+		   the window: then it is clipped too */
+		in.w = o->width;
+		in.h = o->height;
+	}
 	ret = make_buffer(cw, in.w, in.h);
 	if (ret && cw->vram) {		/* no VRAM to be had: the ordinary buffer */
 		cw->vram = 0;
@@ -852,6 +948,7 @@ static void do_open(struct client *c, const struct wbp_hdr *h, const struct wbp_
 	}
 	if (ret) {
 		win_close(cw->scr, cw->w);
+		bm_free(&cw->cbm);
 		free(cw);
 		send_error(c, h, -ret);
 		return;
@@ -870,6 +967,33 @@ static void do_damage(struct cwin *cw, const struct wbp_rect *r)
 	struct rect in, d;
 
 	win_inner(cw->w, &in);
+	if (cw->unscaled) {
+		/* content pixels: copied (unless the display holds them), and the
+		   screen pixels they fall in damaged */
+		float kx = kx_of(cw), ky = ky_of(cw);
+		int X, Y, x0, y0, x1, y1;
+
+		if (cw->attached) {
+			d = rect_make(cw->w->r.x + in.x, cw->w->r.y + in.y, in.w, in.h);
+			screen_damage(cw->scr, &d);
+			return;
+		}
+		if (!cw->w->ext && cw->cbm.px) {
+			rp_init(&rp, &cw->cbm);
+			rp_blit(&rp, r->x, r->y, &cw->view, r->x, r->y, r->w, r->h, -1);
+		}
+		win_content_origin(cw->scr, cw->w, &X, &Y);
+		x0 = (int)((X + r->x) / kx);
+		y0 = (int)((Y + r->y) / ky);
+		x1 = to_screen(X + r->x + r->w, kx);
+		y1 = to_screen(Y + r->y + r->h, ky);
+		d = rect_make(x0, y0, x1 - x0, y1 - y0);
+		in.x += cw->w->r.x;
+		in.y += cw->w->r.y;
+		if (rect_intersect(&d, &d, &in))
+			screen_damage(cw->scr, &d);
+		return;
+	}
 	if (cw->w->ext) {
 		/* the display draws the client's buffer itself: no copy, just where */
 		if (cw->attached) {
@@ -1033,10 +1157,28 @@ static void handle(struct client *c, const struct wbp_hdr *h, const uint8_t *p)
 	case WBP_MOVE_SIZE:
 		if (cw && h->len >= sizeof(struct wbp_rect)) {
 			const struct wbp_rect *r = (const struct wbp_rect *)p;
-			struct rect nr = rect_make(r->x, r->y, r->w + cw->w->bl + cw->w->br,
-						   r->h + cw->w->bt + cw->w->bb);
+			int iw = r->w, ih = r->h;
+			struct rect nr;
 
+			if (cw->unscaled) {
+				iw = to_screen(iw, kx_of(cw));
+				ih = to_screen(ih, ky_of(cw));
+				cw->want_w = r->w;
+				cw->want_h = r->h;
+			}
+			nr = rect_make(r->x, r->y, iw + cw->w->bl + cw->w->br,
+				       ih + cw->w->bt + cw->w->bb);
 			win_move_size(cw->scr, cw->w, &nr);
+			if (cw->unscaled && cw->want_w) {
+				/* the same screen size, another content size */
+				if ((cw->want_w != cw->view.w || cw->want_h != cw->view.h) &&
+				    !make_buffer(cw, cw->want_w, cw->want_h)) {
+					send_window(cw, 0);
+					send_event(cw, IDCMP_NEWSIZE, 0, 0, 0, 0, 0);
+					win_refresh(cw->scr, cw->w);
+				}
+				cw->want_w = cw->want_h = 0;
+			}
 		}
 		break;
 	case WBP_TO_FRONT:
